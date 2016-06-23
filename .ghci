@@ -1,0 +1,7 @@
+:set -Wall
+:set -fdefer-type-errors
+:set -fno-warn-unused-do-bind
+:set -XPartialTypeSignatures
+:set -fbyte-code
+:set -isrc
+:set prompt "> "
