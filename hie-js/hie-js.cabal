@@ -1,0 +1,53 @@
+name:                hie-js
+version:             0.1.0.0
+synopsis:            Initial project template from stack
+description:         Please see README.md
+homepage:            https://github.com/plcplc/hie-js#readme
+license:             BSD3
+license-file:        LICENSE
+author:              Philip Lykke Carlsen
+maintainer:          plcplc@gmail.com
+copyright:           AGPL-3
+category:            Web
+build-type:          Simple
+-- extra-source-files:
+cabal-version:       >=1.10
+
+
+--  flag UseGhcjs
+--  description: Use ghcjs.
+--  default: true
+                     
+library
+  hs-source-dirs:      src
+  ghc-options:         -Wall
+  exposed-modules:     Lib
+
+  build-depends:       base >= 4.7 && < 5
+                     , containers
+                     , compdata
+                     , reflex
+                     , reflex-dom
+                     , safe
+                     , time
+                     , transformers
+                     , constraints
+                     , ghc-prim
+
+  if impl(ghcjs)
+    build-depends:       ghcjs-base
+
+  default-language:    Haskell2010
+
+executable hie-js-output
+  hs-source-dirs:      app
+  main-is:             Main.hs
+  ghc-options:         -Wall
+
+  build-depends:       base >= 4.7 && < 5
+                       , hie-js
+
+  if impl(ghcjs)
+    build-depends:      ghcjs-base
+
+  default-language:    Haskell2010

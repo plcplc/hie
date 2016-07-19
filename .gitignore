@@ -3,3 +3,5 @@
 log.txt
 node_modules/
 dist/
+*.js_hi
+*.js_o
