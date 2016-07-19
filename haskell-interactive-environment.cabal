@@ -60,10 +60,9 @@ library
   build-depends:
                 base >=4.8 && <4.9,
                 containers,
-                gtk,
                 stm,
-                threepenny-gui,
-                hint
+                hint,
+                text
 
   -- Directories containing source files.
   hs-source-dirs:      src

@@ -1,93 +1,104 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE TypeSynonymInstances #-}
-{-# LANGUAGE UndecidableInstances #-}
 -- This module defines the Hie Session object, which the ui frontends use to
 -- interact with the state of a single hie session.
 module Graphics.HIE.Session
   (
-  Document,
-  Module,
-  UIHandler,
-  mkDocument,
-  SimpleSessionM(..),
-  newSimpleSession,
-  runSimpleSession,
-  MonadSession(..),
-  UIAction(..)
+    Identifier(..),
+    Session,
+    UI(..),
+
+    newEmptySession,
+
+    sessionCurrentBindings,
+
+    sessionAddBinding,
+    sessionAddBindingEvents,
+
+    sessionRemoveBinding,
+    sessionRemoveBindingEvents,
+
+    sessionUpdateBinding,
+    sessionUpdateBindingValue,
+    sessionUpdateBindingUI,
+    sessionUpdateBindingEvents,
   ) where
 
+import Control.Monad
 import Control.Concurrent.STM
-import Control.Monad.Reader
+import Data.Maybe
+import Data.Map.Strict as M
+import Data.Text as Text
+import Data.Dynamic
+import Data.String
+
+newtype Identifier = Identifier Text
+  deriving (Eq, Ord, IsString)
 
 
-import Graphics.HIE.AST
-
--- The type class that ui handlers should be written for.
-class (Monad m) => MonadSession m where
-  bind     :: Name -> Exp -> UI -> m ()
-  lookupBinding :: Name -> m (Maybe (UI, Exp))
-  evaluate :: Exp -> m EExp
-  document :: m Document
-
-{-
-
-instance
-  (MonadReader (TVar (SessionState m)) m, MonadIO m)
-  => MonadSession m where
-
-data SessionState m = SessionState {
-  sessionDoc :: Document,
-  sessionUIHandler :: UIHandler m
+data Session = Session {
+  sessionMap                 :: TVar (M.Map Identifier (Dynamic, UI)),
+  sessionAddBindingEvents    :: TChan (Identifier, Dynamic, UI),
+  sessionUpdateBindingEvents :: TChan (Identifier, Dynamic, UI),
+  sessionRemoveBindingEvents :: TChan Identifier
   }
 
-newSessionState :: MonadSession m =>
-  Document ->
-  IO (TVar (SessionState m))
-newSessionState doc ui =
-  newTVarIO (SessionState {
-    sessionDoc = doc,
-    sessionUIHandler = ui
-    })
+-- | This should be some sort of extensible union. (Not all combinations
+-- necessarily make sense.)
+data UI =
+  ShowString |
+  VerticalList UI |
+  Columns [UI] |
+  Date
+  deriving Show
 
-type SimpleState m = TVar (SessionState (SimpleSessionM m))
+newEmptySession :: IO (Session)
+newEmptySession =
+  Session <$>
+    newTVarIO (M.empty) <*>
+    newBroadcastTChanIO <*>
+    newBroadcastTChanIO <*>
+    newBroadcastTChanIO
 
-newtype SimpleSessionM m a = SSM {
-  unSSM :: ReaderT (SimpleState m) m a
-  }
-  deriving (
-    Applicative,
-    Functor,
-    MonadReader (SimpleState m),
-    Monad
-  )
+sessionCurrentBindings :: Session -> STM (M.Map Identifier (Dynamic, UI))
+sessionCurrentBindings (Session{..}) = readTVar sessionMap
 
-runSimpleSession ::
-  SimpleState m ->
-  SimpleSessionM m a ->
-  m a
-runSimpleSession st m = runReaderT (unSSM m) st
--}
+sessionAddBinding :: Session -> Identifier -> Dynamic -> UI -> STM ()
+sessionAddBinding (Session{..}) identifier value ui = void $
+  do
+    store <- readTVar sessionMap
+    let (oldVal, store') = M.insertLookupWithKey (\_ _ v -> v) identifier (value, ui) store
+    (if isJust oldVal
+      then writeTChan sessionUpdateBindingEvents
+      else writeTChan sessionAddBindingEvents)
+      (identifier, value, ui)
+    writeTVar sessionMap store'
 
-{-
+sessionRemoveBinding :: Session -> Identifier -> STM ()
+sessionRemoveBinding (Session{..}) identifier = void $ do
+  do
+    store <- readTVar sessionMap
+    -- What if the element is not present in the store?
+    let store' = M.delete identifier store
+    writeTChan sessionRemoveBindingEvents identifier
+    writeTVar sessionMap store'
 
--- As an alternative to SimpleSessionM I have considered employing Control.Eff:
+sessionUpdateBinding :: Session -> Identifier -> (Dynamic, UI) -> STM ()
+sessionUpdateBinding = undefined
 
-import Control.Eff
+sessionUpdateBindingValue :: Session -> Identifier -> Dynamic -> STM ()
+sessionUpdateBindingValue = undefined
 
-data SessionCommand =
-  SessionBind Name Exp |
-  SessionEvaluate Exp |
-  SessionDocument |
-  SessionSetUI Name UI |
-  SessionTerminate
+sessionUpdateBindingUI :: Session -> Identifier -> UI -> STM ()
+sessionUpdateBindingUI = undefined
 
-data Session a = Session SessionCommand a
+  {-
+sessionAddBindingEvents    :: Session -> STM (TChan (Identifier, Dynamic, UI))
+sessionAddBindingEvents (Session{..}) = dupTChan sessionAddBindingEvents'
+ 
+sessionRemoveBindingEvents :: Session -> STM (TChan Identifier)
+sessionRemoveBindingEvents (Session{..}) = dupTChan sessionRemoveBindingEvents'
 
-instance (Member Session r) => MonadSession (Eff r) where
-
-spawnSession :: MonadSession m => Document -> UIHandler m -> m ()
-spawnSession = error "spawnSession: Not implemented yet"
-
+sessionUpdateBindingEvents :: Session -> STM (TChan (Identifier, Dynamic, UI))
+sessionUpdateBindingEvents (Session{..}) = dupTChan sessionUpdateBindingEvents'
 -}
