@@ -1,5 +1,3 @@
-{-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -8,47 +6,27 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE UndecidableInstances #-}
 
 module Lib
     {-( hieJsMain
     )-} where
 
 import Control.Monad
-import Control.Monad.IO.Class
-import Control.Monad.Trans.Reader
 import Data.Comp
 import Data.Functor.Misc
 import Data.Monoid
 import Data.Proxy
 import Data.Time
 import Data.Typeable
-import Data.Type.Equality
 import GHC.TypeLits
 import Reflex.Dom
-import Safe
 import Unsafe.Coerce
 import qualified Data.Map as M
-
-{-
-
-* An experiment to encapsulate the dynamic matching with a typesig, to
-  centralise the code that needs to use unsafeCoerce in a single,
-  trusted place.
-
-* It's an open question how to handle non-linear type variable occurences.
-  Though I imagine we could build a type familiy that records the
-  variables in a type signature in a list and generate equality
-  constraints, eg '(PolyVar n a -> TyVar n b) ---> Forall (n : a, n :b)
-  ---> a ~ b)
--}
 
 data PolyDyn where
   PolyDyn :: TypeRep -> a -> PolyDyn
@@ -56,38 +34,12 @@ data PolyDyn where
 polyDyn :: Typeable a => a -> PolyDyn
 polyDyn x = PolyDyn (typeOf x) x
 
-data TyVar (name :: Symbol) = MkTyVar { unTyVar :: forall a. a }
-
-{-
-* The current TypeEnv-approach is not type safe, as you can pick any
-  concrete type instead of existentially quantified types if you
-  like. This is an attempt to fix this.
-newtype PolyVar (name :: Symbol) a = MkPolyVar { unPolyVar :: a }
-
-data TypeEnv where
-  TypeEnv :: Symbol -> a -> TypeEnv
-
-type family TypeSigType (sig :: k) (env :: [TypeEnv]) :: k where
-  TypeSigType (TyVar name) env  = PolyVar name (LookupEnv name env)
-  TypeSigType ((c :: * -> k) (a :: *)) env = (TypeSigType c env) (TypeSigType a env)
-  TypeSigType a env = a
-
-type family LookupEnv (name :: Symbol) (env :: [TypeEnv]) :: a where
-  LookupEnv name ('TypeEnv name a ': e) = a
-  LookupEnv name ('TypeEnv name' a ': e) = LookupEnv name e
-
-
-forall' :: Proxy name -> (forall a. Proxy ('TypeEnv name a) -> b) -> b
-forall' = undefined
-
-andforall' ::
-  Proxy name -> (forall a. Proxy ('TypeEnv name a ': env) -> b) -> Proxy env -> b
-andforall' = undefined
--}
-
--- Type signatures for matching 'UiImplementation's. Use 'PolyVar'
+-- Type signatures for matching 'PolyDyn's. Use 'TyVar'
 -- polymorphic 'UiImplementation's.
 newtype TySigRep = TySigRep { unTySig :: TypeRep }
+
+-- | Special, sanctioned type to use in place of free type variables.
+data TyVar (name :: Symbol) = MkTyVar { unTyVar :: forall a. a }
 
 -- | Construct a 'TySig'. It is restricted to kind Star. Use 'PolyVar'
 -- in place of type variables.
@@ -113,12 +65,12 @@ tySigMatch ty           (TyVar' name) = Just (M.singleton name ty)
 tySigMatch _ _ = Nothing
 
 matchPolyDyn ::
-  forall a b. Typeable a =>
+  forall sig b. Typeable sig =>
   PolyDyn ->
-  (ToPolyDyn -> a -> b) ->
+  (ToPolyDyn -> sig -> b) ->
   Maybe b
 matchPolyDyn (PolyDyn tx x) f 
-  | Just typeRepEnv <- tySigMatch tx (tySig (Proxy :: Proxy a)) = Just (f (toDyn typeRepEnv) (unsafeCoerce x))
+  | Just typeRepEnv <- tySigMatch tx (tySig (Proxy :: Proxy sig)) = Just (f (toDyn typeRepEnv) (unsafeCoerce x))
   where
     toDyn :: M.Map String TypeRep -> (KnownSymbol name => TyVar name -> PolyDyn)
     toDyn env (MkTyVar x' :: TyVar name) =
@@ -182,7 +134,10 @@ wrapUiImpl (UiImpl (key, impl)) =
     go :: ui (Term uidomain) -> PolyDyn -> Maybe (m ())
     go ui pd = matchPolyDyn pd (\toDyn d -> impl ui (ToPolyDyn' toDyn) d)
  
--- uidomains:
+-- * Uidomains:
+
+pattern Proj x <- (proj -> Just x)
+
 data UiNonShowable e = UiNonShowable
   deriving (Eq, Functor)
 
@@ -210,6 +165,11 @@ uiNonShowable = Term $ inj UiNonShowable
 uiTextLabel :: (UiTextLabel :<: ui) => Term ui
 uiTextLabel = Term $ inj UiTextLabel
 
+uiList :: (UiList :<: ui) => Term ui -> Term ui
+uiList x = Term $ inj (UiList x)
+
+-- * Reflex-based ui
+
 uiTextLabelImpl ::
   forall uidomain t m.
   (Functor uidomain, UiTextLabel :<: uidomain, MonadWidget t m) =>
@@ -218,88 +178,9 @@ uiTextLabelImpl = UiImpl (UiTextLabel, go)
   where
     go :: UiTextLabel (Term uidomain) -> ToPolyDyn' -> String -> m ()
     go _ _ str = text str
-    
-pattern Proj x <- (proj -> Just x)
-
-uiList :: (UiList :<: ui) => Term ui -> Term ui
-uiList x = Term $ inj (UiList x)
-
-  {-
-uiListImpl ::
-  (Functor uidomain, UiList :<: uidomain, MonadWidget t m) =>
-  Term uidomain -> PolyDyn -> m ()
-uiListImpl = undefined
--}
-
-  {-
-data UiImplementation uidomain where
-  Instance ::
-    Const uidomain -> TySigRep ->
-    (
-      forall t m a. MonadWidget t m =>
-      Term uidomain -> PolyDyn -> m ()
-    ) ->
-    UiImplementation uidomain
--}
-
-{-
-data UiLookup uidomain where
-  UiLookup :: 
-    (Const uidomain -> TypeRep -> Maybe (UiImplementation uidomain)) -> UiLookup uidomain
-
-type SessionT uidomain =
-  ReaderT (UiLookup uidomain) IO 
-
-uiTextLabelImpl ::
-  (UiTextLabel :<: uidomain, Typeable a, Show a) =>
-  Proxy a -> UiImplementation uidomain
-uiTextLabelImpl (px@Proxy :: Proxy a) =
-  Instance (inj UiTextLabel) (tySig $ px) $
-    \_ (_, str) -> liftIO $ print (unsafeCoerce str :: a)
-
--}
-
-{-
-uiListImpl :: (Functor uidomain, UiList :<: uidomain) => UiImplementation uidomain
-uiListImpl = Instance (inj $ UiList ()) (tySig (Proxy :: Proxy [PolyVar "a"])) $
-  \((Term ui)) (ty, l) -> case proj ui of
-    Nothing -> return ()
-    Just (UiList innerUi@(Term innerUi')) ->
-      do
-        let [argTy] = typeRepArgs ty
-
-        UiLookup look <- ask
-        Just (Instance _ _ innerUiImpl) <- return $ look (() <$ innerUi') argTy
-        liftIO $ putStrLn "["
-        mapM_ (\x -> innerUiImpl innerUi (argTy, x)) (unsafeCoerce l :: [a])
-        liftIO $ putStrLn "]"
--}
-
-{-
-runUi ::
-  (Typeable a, Functor uidomain) =>
-  String -> a -> Term uidomain -> SessionT uidomain ()
-runUi name x ui@(Term ui') = do
-  UiLookup look <- ask
-  Just (Instance _ _ innerUiImpl) <- return $ look (() <$ ui') (typeOf x)
-  liftIO $ putStrLn $ name ++ ":"
-  innerUiImpl ui (typeOf x, x)
-
-runSession ::
-  (Eq (Const uidomain)) =>
-  [UiImplementation uidomain] -> SessionT uidomain () -> IO ()
-runSession impls act = runReaderT act (UiLookup uiLookup)
-  where
-    -- TODO: What's wrong with writing the signature below?
-    --uiLookup :: Const uidomain -> TypeRep -> Maybe (UiImplementation uidomain)
-    uiLookup ui ty =
-      headMay $ filter (\(Instance ui' tyS _) -> ui' == ui && tySigMatch ty tyS) impls
--}
 
 data HieValue uidomain where
   HieValue :: PolyDyn -> Term uidomain -> HieValue uidomain
-
--- * Reflex-based ui
 
 data Session t uidomain = Session {
     sessionModel :: Dynamic t (M.Map String (Dynamic t (HieValue uidomain)))
@@ -326,16 +207,10 @@ connectSession bindingEventsDyn = do
   barUiDyn <- holdDyn uiTextLabel (select fanBindings (Const2 "bar"))
   barBindingDyn <- combineDyn HieValue barValDyn barUiDyn
 
-  {-
-  foo2UiDyn <- holdDyn uiNonShowable (select fanBindings (Const2 "foo2"))
-  foo2BindingDyn <- combineDyn HieValue fooValDyn foo2UiDyn
-  -}
-
   Session <$> pure (constDyn $ M.fromList [
                        ("foo1", foo1BindingDyn),
                        ("bar", barBindingDyn)
                        ])
-
 
 hieJsMain :: IO ()
 hieJsMain = mainWidget $ mdo
