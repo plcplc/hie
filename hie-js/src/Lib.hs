@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -9,6 +10,7 @@
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -27,6 +29,8 @@ import GHC.TypeLits
 import Reflex.Dom
 import Unsafe.Coerce
 import qualified Data.Map as M
+import GHC.Exts
+import Data.Constraint
 
 data PolyDyn where
   PolyDyn :: TypeRep -> a -> PolyDyn
@@ -39,14 +43,14 @@ polyDyn x = PolyDyn (typeOf x) x
 newtype TySigRep = TySigRep { unTySig :: TypeRep }
 
 -- | Special, sanctioned type to use in place of free type variables.
-data TyVar (name :: Symbol) = MkTyVar { unTyVar :: forall a. a }
+newtype TyVar (name :: Symbol) = MkTyVar { unTyVar :: forall a. a }
 
 -- | Construct a 'TySig'. It is restricted to kind Star. Use 'PolyVar'
 -- in place of type variables.
 tySig :: (Typeable (a :: *)) => Proxy a -> TySigRep
 tySig = TySigRep . typeRep
 
--- Pattern matching for TypeRep and TySigRep.
+-- | Pattern matching for TypeRep and TySigRep.
 pattern Ty' con args <- (splitTyConApp -> (con, args))
 pattern TySig' con args <- (fmap (map TySigRep) . splitTyConApp . unTySig -> (con, args))
 pattern TyVar' v <-
@@ -54,7 +58,7 @@ pattern TyVar' v <-
     ((== typeRepTyCon (typeRep (Proxy :: Proxy (TyVar "")))) -> True)
     [TySig' (tyConName -> v) []]
 
--- Match a TypeRep with a TySig. Yields a mapping from PolyVar names to
+-- | Match a TypeRep with a TySig. Yields a mapping from PolyVar names to
 -- corresponding TypeReps.
 tySigMatch :: TypeRep -> TySigRep -> Maybe (M.Map String TypeRep)
 tySigMatch (Ty' c1 a1) (TySig' c2 a2)
@@ -64,6 +68,9 @@ tySigMatch (Ty' c1 a1) (TySig' c2 a2)
 tySigMatch ty           (TyVar' name) = Just (M.singleton name ty)
 tySigMatch _ _ = Nothing
 
+-- | Deconstruct a 'PolyDyn'. Occurences of 'TyVar name' in 'sig' will
+-- match anyhting. Values of type 'TyVar name' may be turned into
+-- 'PolyDyn' by means of the supplied 'ToPolyDyn' function.
 matchPolyDyn ::
   forall sig b. Typeable sig =>
   PolyDyn ->
@@ -77,7 +84,8 @@ matchPolyDyn (PolyDyn tx x) f
       let
         pn = (Proxy :: Proxy name)
         name = symbolVal pn
-      in case M.lookup name env of
+      -- Not exactly pretty, but that's how they appear in TypeReps...
+      in case M.lookup ("\"" ++ name ++ "\"") env of
         Just tx' -> PolyDyn tx' x'
         Nothing -> error $ "PolyVar " ++ name ++ " is not present in type map"
     
@@ -85,14 +93,6 @@ matchPolyDyn _ _ = Nothing
 
 type ToPolyDyn = forall name. KnownSymbol name => TyVar name -> PolyDyn
 newtype ToPolyDyn' = ToPolyDyn' ToPolyDyn
-
-withPolyDynEnv ::
-  (Typeable a) =>
-  [PolyDyn] ->
-  (ToPolyDyn -> a -> b) ->
-  Maybe b
-withPolyDynEnv ds f =
-  getFirst $ mconcat $ map (\d -> First $ matchPolyDyn d f) ds
 
 data UiImpl ui uidomain t m where
   UiImpl ::
@@ -141,6 +141,9 @@ pattern Proj x <- (proj -> Just x)
 data UiNonShowable e = UiNonShowable
   deriving (Eq, Functor)
 
+instance EqF UiNonShowable where
+  eqF _ _ = True
+
 data UiTextLabel e = UiTextLabel
   deriving (Eq, Functor)
 
@@ -170,14 +173,41 @@ uiList x = Term $ inj (UiList x)
 
 -- * Reflex-based ui
 
-uiTextLabelImpl ::
+uiNonShowableImpl ::
   forall uidomain t m.
-  (Functor uidomain, UiTextLabel :<: uidomain, MonadWidget t m) =>
-  UiImpl UiTextLabel uidomain t m
-uiTextLabelImpl = UiImpl (UiTextLabel, go)
+  (MonadWidget t m) =>
+  UiImpl UiNonShowable uidomain t m
+uiNonShowableImpl = UiImpl (UiNonShowable, go)
   where
-    go :: UiTextLabel (Term uidomain) -> ToPolyDyn' -> String -> m ()
-    go _ _ str = text str
+    go :: UiNonShowable (Term uidomain) -> ToPolyDyn' -> TyVar "x" -> m ()
+    go _ _ _ = text "<Nonshowable>"
+
+uiTextLabelImpl ::
+  forall a uidomain t m.
+  (MonadWidget t m, Typeable a) =>
+  (a -> String) ->
+  UiImpl UiTextLabel uidomain t m
+uiTextLabelImpl f = UiImpl (UiTextLabel, go)
+  where
+    go :: UiTextLabel (Term uidomain) -> ToPolyDyn' -> a -> m ()
+    go _ _ x = text (f x)
+
+uiListImpl ::
+  forall t m.
+  (MonadWidget t m) =>
+  UiImpl UiList UiDomain t m
+uiListImpl = UiImpl (UiList (), go)
+  where
+    go :: UiList (Term UiDomain) -> ToPolyDyn' -> [TyVar "x"] -> m ()
+    go (UiList innerUi) (ToPolyDyn' d) xs = do
+      -- This should really be encapsulated in a monad x_x...
+      uiEnv' <- uiEnv
+      mapM_ (\pd ->  do
+               case lookupUiEnv uiEnv' innerUi pd of
+                 Nothing -> el "div" (text "Designated UI is nonexistant or incompatible")
+                 Just m -> el "div" m
+           ) (map d xs)
+
 
 data HieValue uidomain where
   HieValue :: PolyDyn -> Term uidomain -> HieValue uidomain
@@ -221,7 +251,15 @@ hieJsMain = mainWidget $ mdo
   return ()
 
 uiEnv :: forall t m. MonadWidget t m => m (UiEnv UiDomain t m)
-uiEnv = return $ concat [wrapUiImpl uiTextLabelImpl]
+uiEnv = return $ concat
+  [
+    wrapUiImpl (uiTextLabelImpl (show :: Double -> String)),
+    wrapUiImpl (uiTextLabelImpl (show :: Int -> String)),
+    wrapUiImpl (uiTextLabelImpl (show :: Char -> String)),
+    wrapUiImpl (uiTextLabelImpl (id :: String -> String)),
+    wrapUiImpl uiListImpl,
+    wrapUiImpl uiNonShowableImpl
+  ]
 
 renderBinding ::
   (MonadWidget t m) =>
@@ -245,11 +283,13 @@ uiSelector ::
   m (Event t (Term UiDomain))
 uiSelector = do
 
-  (uiShowBtn, _) <- el' "button" (text "Show")
-  (uiBlackBoxBtn, _) <- el' "button" (text "Black Box")
+  (uiListTextLabelBtn, _) <- el' "button" (text "List[TextLabel]")
+  (uiTextLabelBtn, _) <- el' "button" (text "TextLabel")
+  (uiNonShowableBtn, _) <- el' "button" (text "NonShowable")
 
   return $ leftmost
     [
-      (uiTextLabel) <$ domEvent Click uiShowBtn,
-      (uiNonShowable) <$ domEvent Click uiBlackBoxBtn
+      (uiList uiTextLabel) <$ domEvent Click uiListTextLabelBtn,
+      (uiTextLabel) <$ domEvent Click uiTextLabelBtn,
+      (uiNonShowable) <$ domEvent Click uiNonShowableBtn
     ]
