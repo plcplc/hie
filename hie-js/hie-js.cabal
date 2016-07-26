@@ -30,7 +30,7 @@ library
                      , reflex-dom
                      , safe
                      , time
-                     , transformers
+                     , mtl
                      , constraints
                      , ghc-prim
 

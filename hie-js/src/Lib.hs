@@ -1,3 +1,5 @@
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
@@ -13,12 +15,14 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Lib
     {-( hieJsMain
     )-} where
 
 import Control.Monad
+import Control.Monad.Reader
 import Data.Comp
 import Data.Functor.Misc
 import Data.Monoid
@@ -94,46 +98,73 @@ matchPolyDyn _ _ = Nothing
 type ToPolyDyn = forall name. KnownSymbol name => TyVar name -> PolyDyn
 newtype ToPolyDyn' = ToPolyDyn' ToPolyDyn
 
-data UiImpl ui uidomain t m where
+data UiImpl uidomain t m where
   UiImpl ::
-    (Typeable sig) =>
-    (
-      ui (),
-      ui (Term uidomain) ->
-      ToPolyDyn' ->
-      sig ->
-      m ()
-    ) -> UiImpl ui uidomain t m
+    (Typeable sig, ui :<: uidomain,
+     MonadWidget t m,
+     Functor m,
+     Reflex t) =>
+    (ui (Term uidomain) ->
+    ToPolyDyn' ->
+    Dynamic t sig ->
+    m (HieSessionActions t uidomain, Event t sig)) ->
+    UiImpl uidomain t m
 
-type UiEnv uidomain t m =
-  [Term uidomain -> PolyDyn -> Maybe (m ())]
+type UiEnv uidomain t m = [UiImpl uidomain t m]
 
 lookupUiEnv ::
-  Eq (Const uidomain) =>
+  forall uidomain t m.
+  MonadHold t m =>
   UiEnv uidomain t m ->
   Term uidomain -> 
-  PolyDyn ->
-  Maybe (m ())
-lookupUiEnv env ui pd = getFirst $ mconcat $ map (\f -> First $ f ui pd) env
-
-wrapUiImpl ::
-  forall uidomain ui t m.
-  (Eq (Const uidomain), Functor ui, EqF ui, Functor uidomain, ui :<: uidomain, MonadWidget t m) =>
-  UiImpl ui uidomain t m -> 
-  UiEnv uidomain t m
-wrapUiImpl (UiImpl (key, impl)) =
-  [(
-  (\(Term ui) pd -> do
-      ui' <- proj ui
-      guard (eqF (() <$ ui') key)
-      go ui' pd
-  ))]
+  (PolyDyn, Event t PolyDyn) ->
+  Maybe (m (HieSessionActions t uidomain, Event t PolyDyn))
+lookupUiEnv env (Term ui) (pd, pdEv) = do
+  getFirst . mconcat . map (\impl -> First $ liftUiImpl impl) $ env
 
   where
+    liftUiImpl ::
+      UiImpl uidomain t m ->
+      Maybe (m (HieSessionActions t uidomain, Event t PolyDyn))
+    liftUiImpl (UiImpl impl) = do
+      ui' <- proj ui
+      (toDyn, sig) <- matchPolyDyn pd (\toDyn d -> (ToPolyDyn' toDyn, d))
+      let sigEvMaybe =
+            (\pd' -> matchPolyDyn pd' (\_ d -> d)) <$>
+            pdEv
 
-    go :: ui (Term uidomain) -> PolyDyn -> Maybe (m ())
-    go ui pd = matchPolyDyn pd (\toDyn d -> impl ui (ToPolyDyn' toDyn) d)
- 
+      return $ do
+        sigDyn <- holdDyn sig (fmapMaybe id sigEvMaybe)
+        (sesActions, updateValEv) <- impl ui' toDyn sigDyn
+        return (sesActions, polyDyn <$> updateValEv)
+
+  {-
+class (Monad m) => MonadHieUi m uidomain t where
+  getUi ::
+    Term uidomain ->
+    Dynamic t PolyDyn ->
+    m (Maybe (m (HieSessionActions t uidomain, Event t PolyDyn)))
+-}
+
+  {-
+instance
+  (MonadHold t m,
+   MonadReader (UiEnv uidomain t (HieUiReaderT m uidomain t))
+               (HieUiReaderT m uidomain t),
+   MonadSample t m, MonadReader (UiEnv uidomain t m) m) =>
+  MonadHieUi (HieUiReaderT m uidomain t) uidomain t where
+  getUi ui pdDyn = do
+    env <- HieUiReaderT ask
+    pd <- HieUiReaderT $ sample $ current pdDyn
+    return $ lookupUiEnv env ui (pd, updated pdDyn)
+
+newtype HieUiReaderT m uidomain t a = HieUiReaderT { unHieUiReaderT :: ReaderT (UiEnv uidomain t (HieUiReaderT m uidomain t)) m a }
+  deriving (Functor, Applicative, Monad)
+
+runHieUiReaderT a ev = runReaderT (unHieUiReaderT a) ev
+
+-}
+    
 -- * Uidomains:
 
 pattern Proj x <- (proj -> Just x)
@@ -156,47 +187,67 @@ data UiList e = UiList e
 instance EqF UiList where
   eqF _ _ = True
 
-data UiFunc e = UiFunc e
+data UiFunc e = UiFunc String e
   deriving (Eq, Functor)
 
 instance EqF UiFunc where
   eqF _ _ = True
 
-uiNonShowable :: (UiNonShowable :<: ui) => Term ui
+uiNonShowable :: (UiNonShowable :<: uidomain) => Term uidomain
 uiNonShowable = Term $ inj UiNonShowable
 
-uiTextLabel :: (UiTextLabel :<: ui) => Term ui
+uiTextLabel :: (UiTextLabel :<: uidomain) => Term uidomain
 uiTextLabel = Term $ inj UiTextLabel
 
-uiList :: (UiList :<: ui) => Term ui -> Term ui
+uiList :: (UiList :<: uidomain) => Term uidomain -> Term uidomain
 uiList x = Term $ inj (UiList x)
+
+uiFunc :: (UiFunc :<: uidomain) => String -> Term uidomain -> Term uidomain
+uiFunc title resultui = Term $ inj (UiFunc title resultui)
 
 -- * Reflex-based ui
 
+data HieSessionActions t uidomain =
+  HieSessionActions {
+    addValue    :: Event t (String, HieValue uidomain)
+    }
+
+noAction :: Reflex t => HieSessionActions t uidomain
+noAction = HieSessionActions never
+
 uiNonShowableImpl ::
   forall uidomain t m.
-  (MonadWidget t m) =>
-  UiImpl UiNonShowable uidomain t m
-uiNonShowableImpl = UiImpl (UiNonShowable, go)
+  (MonadWidget t m, UiNonShowable :<: uidomain) =>
+  UiImpl uidomain t m
+uiNonShowableImpl = UiImpl go
   where
-    go :: UiNonShowable (Term uidomain) -> ToPolyDyn' -> TyVar "x" -> m ()
-    go _ _ _ = text "<Nonshowable>"
+    go ::
+      (sig ~ TyVar "x") =>
+      UiNonShowable (Term uidomain) ->
+      ToPolyDyn' ->
+      Dynamic t sig ->
+      m (HieSessionActions t uidomain, Event t sig)
+    go _ _ _ = text "<Nonshowable>" >> return (noAction, never)
 
 uiTextLabelImpl ::
   forall a uidomain t m.
-  (MonadWidget t m, Typeable a) =>
+  (MonadWidget t m, Typeable a, UiTextLabel :<: uidomain) =>
   (a -> String) ->
-  UiImpl UiTextLabel uidomain t m
-uiTextLabelImpl f = UiImpl (UiTextLabel, go)
+  UiImpl uidomain t m
+uiTextLabelImpl f = UiImpl go
   where
-    go :: UiTextLabel (Term uidomain) -> ToPolyDyn' -> a -> m ()
-    go _ _ x = text (f x)
+    go :: UiTextLabel (Term uidomain) -> ToPolyDyn' -> Dynamic t a -> m (HieSessionActions t uidomain, Event t a)
+    go _ _ x = do
+      strDyn <- mapDyn f x
+      dynText strDyn
+      return (noAction, never)
 
+  {-
 uiListImpl ::
   forall t m.
   (MonadWidget t m) =>
-  UiImpl UiList UiDomain t m
-uiListImpl = UiImpl (UiList (), go)
+  UiImpl UiDomain m
+uiListImpl = UiImpl go
   where
     go :: UiList (Term UiDomain) -> ToPolyDyn' -> [TyVar "x"] -> m ()
     go (UiList innerUi) (ToPolyDyn' d) xs = do
@@ -207,76 +258,175 @@ uiListImpl = UiImpl (UiList (), go)
                  Nothing -> el "div" (text "Designated UI is nonexistant or incompatible")
                  Just m -> el "div" m
            ) (map d xs)
+-}
 
+uiFuncImpl ::
+  forall uidomain t m.
+  (UiFunc :<: uidomain, MonadWidget t m, Reflex t) =>
+  UiImpl uidomain t m
+uiFuncImpl = UiImpl go
+  where
+    go ::
+      (sig ~ (TyVar "a" -> TyVar "b")) =>
+      UiFunc (Term uidomain) ->
+      ToPolyDyn' ->
+      Dynamic t sig ->
+      m (HieSessionActions t uidomain, Event t sig)
+    go _ _ _ = return (noAction, never)
 
-data HieValue uidomain where
-  HieValue :: PolyDyn -> Term uidomain -> HieValue uidomain
-
-data Session t uidomain = Session {
-    sessionModel :: Dynamic t (M.Map String (Dynamic t (HieValue uidomain)))
+data HieValue uidomain =
+  HieValue {
+    hieValue :: PolyDyn,
+    hieUi    :: Term uidomain
     }
 
--- A toy session currently.
-type UiDomain = UiList :+: UiTextLabel :+: UiNonShowable
-connectSession ::
-  MonadWidget t m =>
-  MonadHold t m =>
-  Dynamic t (M.Map String (Event t (Term UiDomain)))->
-  m (Session t UiDomain)
-connectSession bindingEventsDyn = do
+data UiSession t uidomain = UiSession {
+    sessionModel :: Dynamic t (M.Map String (HieValue uidomain))
+    }
 
-  bindingEvents <- switchPromptlyDyn <$> mapDyn mergeMap bindingEventsDyn
-  let fanBindings = fanMap bindingEvents
-
-  incrementEvent <- tickLossy 1 (UTCTime (toEnum 0) 0)
-  fooValDyn <- count incrementEvent >>= mapDyn (polyDyn . show :: Int -> PolyDyn)
-  foo1UiDyn <- holdDyn uiTextLabel (select fanBindings (Const2 "foo1"))
-  foo1BindingDyn <- combineDyn HieValue fooValDyn foo1UiDyn
-
-  let barValDyn = constDyn (polyDyn (42 :: Int))
-  barUiDyn <- holdDyn uiTextLabel (select fanBindings (Const2 "bar"))
-  barBindingDyn <- combineDyn HieValue barValDyn barUiDyn
-
-  Session <$> pure (constDyn $ M.fromList [
-                       ("foo1", foo1BindingDyn),
-                       ("bar", barBindingDyn)
-                       ])
+type UiDomain = UiList :+: UiTextLabel :+: UiNonShowable :+: UiFunc
 
 hieJsMain :: IO ()
 hieJsMain = mainWidget $ mdo
 
   el "h1" (text "HIE Document")
-  Session model <- connectSession bindingEvents
-  bindingEvents <- listWithKey model (\name val -> renderBinding name (joinDyn val))
+
+  -- Initial test bindings
+  addBindingEvent <-
+    (("foo", HieValue (polyDyn (42 :: Int)) uiTextLabel) <$) <$> getPostBuild
+  
+  wireSession addBindingEvent
   return ()
 
-uiEnv :: forall t m. MonadWidget t m => m (UiEnv UiDomain t m)
-uiEnv = return $ concat
+uiEnv :: forall t m . (MonadWidget t m) =>m (UiEnv UiDomain t m)
+--uiEnv :: HieUiMonad m UiDomain t => m (UiEnv UiDomain t m)
+uiEnv = return
   [
-    wrapUiImpl (uiTextLabelImpl (show :: Double -> String)),
-    wrapUiImpl (uiTextLabelImpl (show :: Int -> String)),
-    wrapUiImpl (uiTextLabelImpl (show :: Char -> String)),
-    wrapUiImpl (uiTextLabelImpl (id :: String -> String)),
-    wrapUiImpl uiListImpl,
-    wrapUiImpl uiNonShowableImpl
+    (uiTextLabelImpl (show :: Double -> String)),
+    (uiTextLabelImpl (show :: Int -> String)),
+    (uiTextLabelImpl (show :: Char -> String)),
+    (uiTextLabelImpl (id :: String -> String)),
+     -- uiListImpl,
+    uiNonShowableImpl,
+    uiFuncImpl
   ]
 
-renderBinding ::
+wireSession ::
+  forall t m.
+  MonadWidget t m =>
+  MonadHold t m =>
+  Event t (String, HieValue UiDomain) ->
+  m ()
+wireSession addEvent = do
+
+  let addEvent' = uncurry M.singleton . (\(f,s) -> (f, Just s)) <$> addEvent
+
+  -- TODO: wire 'HieSessionActions's with recursive binding.
+  widgetModelDyn <- listWithKeyShallowDiff M.empty addEvent' bindingWidget
+
+  -- TODO: Construct a suitable session (data)model.
+  return ()
+  {-
+
+  -- TODO: Consider merging HieSessionActions to a single, compound event.
+  -- All this merging and extracting seems a little awkward..
+
+  let switchUiAction actionDyn selector =
+        switchPromptlyDyn <$>
+        mapDyn (mergeMap . M.map selector) (joinDynThroughMap actionDyn)
+
+  let updateEndo f = fmap (mconcat . map (Endo . f ) . M.toList)
+  let updateValEndo set = updateEndo (\(name, val) -> M.update (Just . set val ) name)
+
+  addValueEvents    <-
+    updateEndo (uncurry M.insert . snd)
+      <$> switchUiAction bindingEventsDyn addValue
+  -}
+
+  {-
+
+  -- NOTE: 'updateValue' and 'updateUi' shouldn't make model updates
+  -- in this function. Rather, they are wired at their use site. A use
+  -- case for observing these events here could be to update a server.
+
+  let switchUiAction actionDyn selector =
+        switchPromptlyDyn <$>
+        mapDyn (mergeMap . M.map selector) (joinDynThroughMap actionDyn)
+
+  let updateEndo f = fmap (mconcat . map (Endo . f ) . M.toList)
+  let updateValEndo set = updateEndo (\(name, val) -> M.update (Just . set val ) name)
+
+  updateValueEvents <-
+    updateValEndo (\val v -> v { hieValue = val })
+    <$> switchUiAction bindingEventsDyn updateValue
+
+  updateUiEvents    <-
+    updateValEndo (\ui v -> v { hieUi = ui })
+    <$> switchUiAction bindingEventsDyn updateUi
+
+  let updateEvents = mergeWith mappend [addValueEvents, updateValueEvents, updateUiEvents]
+  -}
+
+
+bindingWidget ::
   (MonadWidget t m) =>
-  String -> Dynamic t (HieValue UiDomain) -> m (Event t (Term UiDomain))
-renderBinding name val = el "div" $ do
-  
+  String ->
+  HieValue UiDomain ->
+  Event t (HieValue UiDomain)->
+  m (HieSessionActions t UiDomain, Dynamic t (HieValue UiDomain))
+bindingWidget name val updateBindingEvent = el "div" $ mdo
+
   el "h2" (text name)
-  _ <- dyn =<< mapDyn renderUi val
-  uiSelector
 
-renderUi :: MonadWidget t m => HieValue UiDomain -> m ()
-renderUi (HieValue pd ui) = do
+  let valueUpdateEvent = leftmost
+        [
+          hieValue <$> updateBindingEvent
+        ]
+  let uiUpdateEvent = leftmost
+        [
+          hieUi <$> updateBindingEvent,
+          selectUiEvent
+        ]
+    
+  (actionEvents, bindingUpdatedEvent) <-
+    valueWidget val valueUpdateEvent uiUpdateEvent
+  selectUiEvent <- uiSelector
 
-  uiEnv' <- uiEnv
-  case lookupUiEnv uiEnv' ui pd of
-    Nothing -> text "Designated UI is nonexistant or incompatible"
-    Just m -> m
+  bindingDyn <- holdDyn val bindingUpdatedEvent
+
+  return (actionEvents, bindingDyn)
+
+valueWidget ::
+  forall t m.
+  (MonadHold t m, MonadWidget t m) =>
+  HieValue UiDomain ->
+  Event t (PolyDyn) ->
+  Event t (Term UiDomain) ->
+  m (HieSessionActions t UiDomain, Event t (HieValue UiDomain))
+valueWidget val valueUpdateEvent uiUpdateEvent = do
+
+  uiDyn <- holdDyn (hieUi val) uiUpdateEvent
+
+  x <- dyn =<< mapDyn (\ui -> do
+                     uiEnv' <- uiEnv
+                     case lookupUiEnv uiEnv' ui (hieValue val, valueUpdateEvent) of
+                         Nothing -> do
+                           text "Designated UI is nonexistant or incompatible"
+                           return (noAction, never)
+                         Just es -> es
+                         ) uiDyn
+
+  sessionActions <- switchSessionActions (fmap (\(e,_) -> e) x)
+  valUpdateEndoEvent <- switchPromptly never (fmap (\(_,e) -> e) x)
+  return (
+    sessionActions,
+    (\(ui, pd) -> HieValue pd ui) <$> attachDyn uiDyn valUpdateEndoEvent)
+
+switchSessionActions ::
+  (MonadHold t m, Reflex t) =>
+  Event t (HieSessionActions t uidomain) ->
+  m (HieSessionActions t uidomain)
+switchSessionActions ev = HieSessionActions <$> switchPromptly never ((fmap addValue) ev)
 
 uiSelector ::
   (Reflex t, MonadWidget t m) =>
@@ -287,7 +437,7 @@ uiSelector = do
   (uiTextLabelBtn, _) <- el' "button" (text "TextLabel")
   (uiNonShowableBtn, _) <- el' "button" (text "NonShowable")
 
-  return $ leftmost
+  return $ leftmost $
     [
       (uiList uiTextLabel) <$ domEvent Click uiListTextLabelBtn,
       (uiTextLabel) <$ domEvent Click uiTextLabelBtn,
