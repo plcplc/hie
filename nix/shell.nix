@@ -8,7 +8,6 @@
         cabal-install
         stack
         extensible-effects
-        hint
         compdata
         mtl
         stm
