@@ -1,5 +1,7 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
@@ -8,12 +10,12 @@ module Lib where
 
 import Data.Comp
 import Data.Dynamic.PolyDyn
-import Hie.Ui.Types
+import Hie.Session
+import Hie.Ui.Func
+import Hie.Ui.List
 import Hie.Ui.NonShowable
 import Hie.Ui.TextLabel
-import Hie.Ui.List
-import Hie.Ui.Func
-import Hie.Session
+import Hie.Ui.Types
 import Reflex.Dom
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Map as M
@@ -27,6 +29,51 @@ hieJsMain = mainWidgetWithCss
               \input {\
               \  border: 1px solid black;\
               \}\
+              \.bindingWidget {\
+              \  background: rgb(240, 240, 240);\
+              \}\
+              \.bindingWidget:hover .uiSelector {\
+              \  display: block;\
+              \}\
+              \.uiSelector {\
+              \  display: none;\
+              \  background-color: rgb(240, 240, 240);\
+              \  border: 1px solid rgb(100, 100, 150);\
+              \  padding: 10px;\
+              \  float: right;\
+              \}\
+              \.uiSelector ul {\
+              \  display: block;\
+              \  margin: 0px;\
+              \  padding: 0px;\
+              \}\
+              \.uiSelector ul li {\
+              \  display: inline;\
+              \  font-style: italic;\
+              \  font-size: small;\
+              \}\
+              \.uiSelector ul li:after {\
+              \  content: \", \";\
+              \}\
+              \.uiSelector ul li + li {\
+              \  margin-left: 5px;\
+              \}\
+              \.uiSelector ul li:last-child:after {\
+              \  content: \"\";\
+              \}\
+              \.uiSelector > .uiSelectorStep {\
+              \  display: none;\
+              \}\
+              \.uiSelector:hover > .uiSelectorStep {\
+              \  display: block;\
+              \}\
+              \.uiSelectorStep {\
+              \  background-color: rgb(240, 240, 240);\
+              \  mix-blend-mode: multiply;\
+              \}\
+              \.uiSelectorStep > .uiSelectorStep {\
+              \  margin-left: 20px;\
+              \}\
               \") $ mdo
 
   el "h1" (text "HIE Document")
@@ -37,12 +84,12 @@ hieJsMain = mainWidgetWithCss
      [
        ("foo", Just $ HieValue (polyDyn (42 :: Int)) uiTextLabel),
        ("bar", Just $ HieValue (polyDyn ([42, 43] :: [Int])) (uiList uiTextLabel)),
-       ("id", Just $ HieValue (polyDyn (id :: FreeVar "a" -> FreeVar "a")) (uiFunc "id" (uiTextLabel))),
-       ("plus3", Just $ HieValue (polyDyn ( (+3) :: Int -> Int)) (uiFunc "+3" (uiTextLabel)))
+       ("id", Just $ HieValue (polyDyn (id :: FreeVar "a" -> FreeVar "a")) (uiFunc (uiTextLabel))),
+       ("plus3", Just $ HieValue (polyDyn ( (+3) :: Int -> Int)) (uiFunc (uiTextLabel)))
      ] <$) <$> getPostBuild
   
   uiEnv' <- uiEnv
-  wireSession uiEnv' uiSelector addBindingEvent
+  wireSession uiEnv' addBindingEvent
   return ()
 
 type UiDomain = UiList :+: UiTextLabel :+: UiNonShowable :+: UiFunc
@@ -58,26 +105,3 @@ uiEnv = return
     uiNonShowableImpl,
     uiFuncImpl
   ]
-
--- TODO: Generate this ui by means of a type class constraint on 'uidomain'.
-uiSelector ::
-  (Reflex t, MonadWidget t m) =>
-  (UiNonShowable :<: uidomain) =>
-  (UiTextLabel :<: uidomain) =>
-  (UiList :<: uidomain) =>
-  (UiFunc :<: uidomain) =>
-  m (Event t (Term uidomain))
-uiSelector = do
-
-  (uiListTextLabelBtn, _) <- el' "button" (text "List[TextLabel]")
-  (uiTextLabelBtn, _) <- el' "button" (text "TextLabel")
-  (uiNonShowableBtn, _) <- el' "button" (text "NonShowable")
-  (uiFuncTextLabelBtn, _) <- el' "button" (text "Func[TextLabel]")
-
-  return $ leftmost $
-    [
-      (uiNonShowable) <$ domEvent Click uiNonShowableBtn,
-      (uiTextLabel) <$ domEvent Click uiTextLabelBtn,
-      (uiList uiTextLabel) <$ domEvent Click uiListTextLabelBtn,
-      (uiFunc "f" uiTextLabel) <$ domEvent Click uiFuncTextLabelBtn
-    ]

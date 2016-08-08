@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
@@ -14,10 +15,28 @@
 module Hie.Ui.Func where
 
 import Data.Comp
+import Data.Comp.Show
 import Data.Dynamic.PolyDyn
 import Hie.Ui.Types
 import Reflex.Dom
 import qualified Data.Map.Lazy as LM
+
+data UiFunc e = UiFunc e
+  deriving (Eq, Functor, Foldable, Traversable)
+
+instance EqF UiFunc where
+  eqF _ _ = True
+
+instance ShowF UiFunc where
+  showF (UiFunc _) = "UiFunc"
+
+instance UiSelectable UiFunc where
+
+  uiIdentifier _ = "Function"
+  enumerateUi = [UiFunc ()]
+
+uiFunc :: (UiFunc :<: uidomain) => Term uidomain -> Term uidomain
+uiFunc resultui = Term $ inj (UiFunc resultui)
 
 uiFuncImpl ::
   forall uidomain t m.
@@ -27,7 +46,7 @@ uiFuncImpl = UiImpl go
   where
 
     go :: UiImplK t uidomain m UiFunc (FreeVar "a" -> FreeVar "b")
-    go lookupHieVal _ (UiFunc _ resUi) fPmDyn = mdo
+    go lookupHieVal _ (UiFunc resUi) fPmDyn = mdo
 
       -- Designating an argument to apply the function on:
 

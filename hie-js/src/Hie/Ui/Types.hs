@@ -1,12 +1,13 @@
-{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Hie.Ui.Types where
 
@@ -17,42 +18,6 @@ import Reflex.Dom
 import qualified Data.Map as M
 
 pattern Proj x <- (proj -> Just x)
-
-data UiNonShowable e = UiNonShowable
-  deriving (Eq, Functor)
-
-instance EqF UiNonShowable where
-  eqF _ _ = True
-
-uiNonShowable :: (UiNonShowable :<: uidomain) => Term uidomain
-uiNonShowable = Term $ inj UiNonShowable
-
-data UiTextLabel e = UiTextLabel
-  deriving (Eq, Functor)
-
-instance EqF UiTextLabel where
-  eqF _ _ = True
-
-uiTextLabel :: (UiTextLabel :<: uidomain) => Term uidomain
-uiTextLabel = Term $ inj UiTextLabel
-
-data UiList e = UiList e
-  deriving (Eq, Functor)
-
-instance EqF UiList where
-  eqF _ _ = True
-
-uiList :: (UiList :<: uidomain) => Term uidomain -> Term uidomain
-uiList x = Term $ inj (UiList x)
-
-data UiFunc e = UiFunc String e
-  deriving (Eq, Functor)
-
-instance EqF UiFunc where
-  eqF _ _ = True
-
-uiFunc :: (UiFunc :<: uidomain) => String -> Term uidomain -> Term uidomain
-uiFunc title resultui = Term $ inj (UiFunc title resultui)
 
 type LookupUi uidomain t m = 
   Term uidomain -> 
@@ -98,3 +63,45 @@ data HieValue uidomain =
     hieValue :: PolyDyn,
     hieUi    :: Term uidomain
     }
+
+-- | A data type expressing a grammar of 'f'-expression trees, represented by
+-- lazy potentially infinite syntax tree of all the expressions permitted by the
+-- grammar.
+newtype UiGrammar f = UiGrammar { unGrammar :: [f (UiGrammar f)] }
+
+allGrammar :: [UiGrammar f -> f (UiGrammar f)] -> UiGrammar f
+allGrammar fs = UiGrammar (map ($ allGrammar fs) fs)
+
+-- | Applicative interface to Dynamic values. Used by the 'uiSelector'. This is
+-- necessary for traversals (using 'traverse') that generate 'Dynamic's.
+newtype UiBuilder m t a = UiBuilder {unUiBuilder :: m (Dynamic t a)}
+
+instance (MonadHold t m, Reflex t) => Functor (UiBuilder m t) where
+  fmap f (UiBuilder m) = UiBuilder $ mapDyn f =<< m
+  x <$ _ = UiBuilder $ return $ constDyn x
+
+instance (MonadHold t m, Reflex t) => Applicative (UiBuilder m t) where
+  pure = UiBuilder . return . constDyn
+  (UiBuilder f) <*> (UiBuilder x) = UiBuilder $ do
+    f' <- f
+    x' <- x
+    mapDyn (\(f'', x'') -> f'' x'') =<< collectDyn (f', x')
+
+class UiSelectable (ui :: * -> *) where
+  uiIdentifier :: ui a -> String
+  enumerateUi  :: [Const ui]
+
+instance (
+  ui1 :<: (ui1 :+: ui2),
+  ui2 :<: (ui1 :+: ui2),
+  UiSelectable ui1,
+  UiSelectable ui2
+  ) =>
+  UiSelectable (ui1 :+: ui2) where
+
+  uiIdentifier = caseF uiIdentifier uiIdentifier
+
+  enumerateUi =
+    (map inj (enumerateUi :: [Const ui1])) ++
+    (map inj (enumerateUi :: [Const ui2]))
+

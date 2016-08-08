@@ -11,6 +11,8 @@ module Hie.Session where
 import Control.Monad.Except
 import Data.Comp
 import Data.Dynamic.PolyDyn
+import Data.List
+import Data.Maybe
 import Data.Monoid
 import Hie.Ui.Types
 import Reflex.Aux
@@ -47,14 +49,15 @@ data UiSession t uidomain =
 
 wireSession ::
   forall t m uidomain.
-  MonadWidget t m =>
-  MonadFix m =>
-  MonadHold t m =>
+  UiSelectable uidomain =>
+  Traversable uidomain  =>
+  MonadWidget t m       =>
+  MonadFix m            =>
+  MonadHold t m         =>
   UiEnv uidomain t m ->
-  m (Event t (Term uidomain)) ->
   Event t (M.Map String (Maybe (HieValue uidomain))) ->
   m ()
-wireSession uiEnv uiSelector updateBindingsExo = mdo
+wireSession uiEnv updateBindingsExo = mdo
 
   updateBindingsEndo <-
     switchPromptlyDyn <$>
@@ -79,8 +82,9 @@ bindingWidget ::
   Event t (HieValue uidomain)->
   m (HieSessionActions t uidomain, Dynamic t (HieValue uidomain))
 bindingWidget uiEnv uiSelector lookupHieVal name val updateBindingEvent =
-  elWith "div" bindingCssStyle $ mdo
+  divClass "bindingWidget" $ mdo
 
+  selectUiEvent <- el "div" uiSelector
   el "h2" $ do
     valTy <- holdDyn
              (polyDynTy . hieValue $ val)
@@ -99,19 +103,12 @@ bindingWidget uiEnv uiSelector lookupHieVal name val updateBindingEvent =
           selectUiEvent
         ]
     
-  selectUiEvent <- el "div" uiSelector
   (actionEvents, bindingUpdatedEvent) <- el "div" $
     valueWidget uiEnv lookupHieVal val valueUpdateEvent uiUpdateEvent
 
   bindingDyn <- holdDyn val bindingUpdatedEvent
 
   return (actionEvents, bindingDyn)
-
-  where
-
-    bindingCssStyle = def {
-      _elConfig_attributes = LM.fromList [("style", "background: rgb(240, 240, 240);")]
-      }
 
 valueWidget ::
   forall t m uidomain.
@@ -156,3 +153,77 @@ switchSessionActionsDyn ::
 switchSessionActionsDyn actsDyn = do
   updateDyn <- mapDyn updateBindings actsDyn
   return (HieSessionActions $ switchPromptlyDyn updateDyn)
+
+noHoles :: (Traversable f) => Cxt h f a -> Maybe (Term f)
+noHoles (Hole _) = Nothing
+noHoles (Term x) = Term <$> traverse noHoles x
+
+uiGrammar :: (Functor uidomain, UiSelectable uidomain) => UiGrammar uidomain
+uiGrammar = allGrammar [ (<$ ui) | ui <- enumerateUi ]
+
+uiSelector ::
+  forall uidomain t m.
+  (
+    Functor uidomain,
+    Traversable uidomain,
+    UiSelectable uidomain,
+    MonadHold t m,
+    Reflex t,
+    MonadWidget t m
+  ) =>
+  m (Event t (Term uidomain))
+uiSelector = divClass "uiSelector" $ do
+  text "Set ui"
+  uiDyn <- uiSelectorStep (uiGrammar :: UiGrammar uidomain)
+  return $ push (return . noHoles) (updated uiDyn)
+
+uiSelectorStep ::
+  forall uidomain t m.
+  (
+    Traversable uidomain,
+    UiSelectable uidomain,
+    MonadHold t m,
+    Reflex t,
+    MonadWidget t m
+  ) =>
+  UiGrammar uidomain ->
+  -- TODO: Maybe we should just work in terms of 'Event's?
+  m (Dynamic t (Cxt Hole uidomain ()))
+uiSelectorStep (UiGrammar prods) = divClass "uiSelectorStep" $ mdo
+
+  let idMap = identMap prods
+  input <- textInput def
+
+  alternativesDyn <-
+    mapDyn (\v -> filter (isPrefixOf v) (M.keys idMap)) (value input)
+
+  -- Show the list of alternatves, as long as a choice has not been comitted.
+  _ <- elDynAttr "ul" altAttrs $ do
+    dyn =<< mapDyn (mapM (el "li" . text)) alternativesDyn
+
+  altAttrs <- mapDyn
+    (\sel ->
+     M.singleton "style"
+      (if isJust sel
+       then "display: none;"
+       else "")
+    ) selectedDyn
+
+  selectedDyn <-
+    mapDyn (`M.lookup` idMap) (value input)
+
+  uiDynEv <- dyn =<< mapDyn (\uiMatch -> case uiMatch of
+    Nothing -> return $ constDyn $ Hole ()
+    Just ui -> unUiBuilder (Term <$> traverse (UiBuilder . uiSelectorStep) ui)
+    ) selectedDyn
+
+  joinDyn <$> holdDyn (constDyn $ Hole ()) uiDynEv
+
+  where
+
+    -- TODO: What if two different 'ui' types yield the same 'uiIdentifier'-strings?
+    -- Maybe we should just let the user choose between them, though we will
+    -- probably need 'Typeable ui' to usefully differentiate them. But this is
+    -- sort of pathological anyway, as 'uiIdentifier' is meant to be unique.
+    identMap :: [uidomain a] -> M.Map String (uidomain a)
+    identMap = M.unions . map (\ui -> M.singleton (uiIdentifier ui) ui)

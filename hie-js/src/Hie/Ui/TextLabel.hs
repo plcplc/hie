@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
@@ -13,18 +14,29 @@
 
 module Hie.Ui.TextLabel where
 
-import Control.Monad.Except
 import Data.Comp
+import Data.Comp.Show
 import Data.Dynamic.PolyDyn
-import Data.Monoid
-import Data.Proxy
 import Data.Typeable
 import Hie.Ui.Types
 import Reflex.Dom
-import qualified Data.ByteString.Char8 as BS8
-import qualified Data.List.NonEmpty as NE
-import qualified Data.Map as M
-import qualified Data.Map.Lazy as LM
+
+data UiTextLabel e = UiTextLabel
+  deriving (Eq, Functor, Foldable, Traversable)
+
+instance EqF UiTextLabel where
+  eqF _ _ = True
+
+instance ShowF UiTextLabel where
+  showF _ = "UiTextLabel"
+
+instance UiSelectable UiTextLabel where
+
+  uiIdentifier _ = "TextLabel"
+  enumerateUi = [UiTextLabel]
+
+uiTextLabel :: (UiTextLabel :<: uidomain) => Term uidomain
+uiTextLabel = Term $ inj UiTextLabel
 
 uiTextLabelImpl ::
   forall a uidomain t m.

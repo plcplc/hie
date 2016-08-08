@@ -1,3 +1,5 @@
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
@@ -13,6 +15,7 @@
 module Hie.Ui.List where
 
 import Data.Comp
+import Data.Comp.Show
 import Data.Dynamic.PolyDyn
 import Data.Proxy
 import Data.Typeable
@@ -20,6 +23,22 @@ import Hie.Ui.Types
 import Reflex.Dom
 import qualified Data.List.NonEmpty as NE
 
+data UiList e = UiList e
+  deriving (Eq, Functor, Foldable, Traversable)
+
+instance EqF UiList where
+  eqF _ _ = True
+
+instance ShowF UiList where
+  showF _ = "UiList"
+
+instance UiSelectable UiList where
+
+  uiIdentifier _ = "List"
+  enumerateUi = [UiList ()]
+
+uiList :: (UiList :<: uidomain) => Term uidomain -> Term uidomain
+uiList x = Term $ inj (UiList x)
 
 uiListImpl ::
   forall t m uidomain.
