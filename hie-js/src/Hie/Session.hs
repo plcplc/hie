@@ -12,13 +12,14 @@ import Control.Monad.Except
 import Data.Comp
 import Data.Dynamic.PolyDyn
 import Data.List
+import Data.Foldable
 import Data.Maybe
 import Data.Monoid
+import Data.Traversable
 import Hie.Ui.Types
 import Reflex.Aux
 import Reflex.Dom
 import qualified Data.Map as M
-import qualified Data.Map.Lazy as LM
 
 lookupUiEnv ::
   forall uidomain t m.
@@ -44,7 +45,7 @@ lookupUiEnv env (Term ui) (pd, pdEv) lookupHieVal = do
 
 data UiSession t uidomain =
   UiSession {
-    sessionModel :: Dynamic t (M.Map String (HieValue uidomain))
+    sessionModel :: Dynamic t (M.Map String (Dynamic t (HieValue uidomain)))
     }
 
 wireSession ::
@@ -56,57 +57,71 @@ wireSession ::
   MonadHold t m         =>
   UiEnv uidomain t m ->
   Event t (M.Map String (Maybe (HieValue uidomain))) ->
-  m ()
+  m (UiSession t uidomain)
 wireSession uiEnv updateBindingsExo = mdo
 
+  -- An event that notifies that a widget inside the document wants to change
+  -- the set of bound values (add, remove or change a value).
   updateBindingsEndo <-
     switchPromptlyDyn <$>
     mapDyn (mergeWith M.union . M.elems . M.map (updateBindings . fst)) widgetModelDyn 
+
+  -- The event that finally defines changes to values bound in the document is
+  -- the endogenous and exogenous update events, taken together.
   let updateBindings' = mergeWith M.union [updateBindingsExo, updateBindingsEndo]
 
-  widgetModelDyn <- listWithKeyShallowDiff M.empty updateBindings' (bindingWidget uiEnv uiSelector valuesModel)
+  widgetModelDyn <-
+    listWithKeyShallowDiff
+      M.empty
+      updateBindings'
+      (bindingWidget uiEnv uiSelector valuesModel)
 
-  valuesModel' <- mapDyn (M.map snd) widgetModelDyn 
-  let valuesModel k = joinDynThroughMaybe $ selectMapShallow valuesModel' k
+  documentModel <- mapDyn (M.map snd) widgetModelDyn 
+  let valuesModel k = joinDynThroughMaybe $ selectMapShallow documentModel k
 
-  -- TODO: Construct a suitable session (data)model.
-  return ()
+  return (UiSession documentModel)
 
+-- | The widget that represents the binding of a name to a value gets as input:
+-- * Some means to inspect the rest of the document (uiEnv, uiSelector, lookupHieVal)
+-- * The name of the binding
+-- * The initial HieValue
+-- * An event that notifies the widget that something outside itself has changed
+--   the value being bound.
 bindingWidget ::
   (MonadWidget t m) =>
-  (UiEnv uidomain t m) ->
-  m (Event t (Term uidomain)) ->
+  UiEnv uidomain t m ->
+  (Term uidomain -> m (Event t (Term uidomain))) ->
   (String -> Dynamic t (Maybe (HieValue uidomain))) ->
   String ->
   HieValue uidomain ->
   Event t (HieValue uidomain)->
   m (HieSessionActions t uidomain, Dynamic t (HieValue uidomain))
-bindingWidget uiEnv uiSelector lookupHieVal name val updateBindingEvent =
+bindingWidget uiEnv uiSelector' lookupHieVal name val updateValueExo =
   divClass "bindingWidget" $ mdo
 
-  selectUiEvent <- el "div" uiSelector
+  selectUiEvent <- uiSelector' $ hieUi val
   el "h2" $ do
     valTy <- holdDyn
              (polyDynTy . hieValue $ val)
-             (polyDynTy . hieValue <$> updateBindingEvent)
+             (polyDynTy . hieValue <$> updateValueExo)
 
     nameDyn <- mapDyn (\t -> name ++ " : "  ++ show t) valTy
     dynText nameDyn
 
   let valueUpdateEvent = leftmost
         [
-          hieValue <$> updateBindingEvent
+          hieValue <$> updateValueExo
         ]
   let uiUpdateEvent = leftmost
         [
-          hieUi <$> updateBindingEvent,
+          hieUi <$> updateValueExo,
           selectUiEvent
         ]
     
-  (actionEvents, bindingUpdatedEvent) <- el "div" $
+  (actionEvents, valueUpdatedEvent) <- el "div" $
     valueWidget uiEnv lookupHieVal val valueUpdateEvent uiUpdateEvent
 
-  bindingDyn <- holdDyn val bindingUpdatedEvent
+  bindingDyn <- holdDyn val valueUpdatedEvent
 
   return (actionEvents, bindingDyn)
 
@@ -161,6 +176,23 @@ noHoles (Term x) = Term <$> traverse noHoles x
 uiGrammar :: (Functor uidomain, UiSelectable uidomain) => UiGrammar uidomain
 uiGrammar = allGrammar [ (<$ ui) | ui <- enumerateUi ]
 
+renderUiSelectable :: forall uidomain. (Foldable uidomain, UiSelectable uidomain) => Term uidomain -> String
+renderUiSelectable ui = go 0 ui ""
+  where
+
+    go :: Int -> Term uidomain -> ShowS
+    go _       (Term ui') | null ui' = (uiIdentifier ui' ++)
+    go precCxt (Term ui') =
+      let precX = 1
+      in parens precCxt precX
+        ((uiIdentifier ui' ++) .
+         (" "++) .
+         (foldl' (\acc ui'' -> acc . go precX ui'') id ui'))
+
+    parens :: Int -> Int -> ShowS -> ShowS
+    parens precCxt precX x | precCxt >= precX = ("(" ++) . x . (++ ")")
+    parens _ _ x = x
+
 uiSelector ::
   forall uidomain t m.
   (
@@ -171,11 +203,16 @@ uiSelector ::
     Reflex t,
     MonadWidget t m
   ) =>
+  Term uidomain ->
   m (Event t (Term uidomain))
-uiSelector = divClass "uiSelector" $ do
-  text "Set ui"
+uiSelector initial = divClass "uiSelector" $ mdo
+  dynText textDyn
   uiDyn <- uiSelectorStep (uiGrammar :: UiGrammar uidomain)
-  return $ push (return . noHoles) (updated uiDyn)
+  textDyn <- holdDyn
+    ("Ui: " ++ renderUiSelectable initial)
+    (("Ui: " ++) . renderUiSelectable <$> resEv)
+  let resEv = push (return . noHoles) (updated uiDyn)
+  return resEv
 
 uiSelectorStep ::
   forall uidomain t m.
@@ -187,15 +224,14 @@ uiSelectorStep ::
     MonadWidget t m
   ) =>
   UiGrammar uidomain ->
-  -- TODO: Maybe we should just work in terms of 'Event's?
   m (Dynamic t (Cxt Hole uidomain ()))
 uiSelectorStep (UiGrammar prods) = divClass "uiSelectorStep" $ mdo
 
-  let idMap = identMap prods
+  let grammarIdMap = identMap prods
   input <- textInput def
 
   alternativesDyn <-
-    mapDyn (\v -> filter (isPrefixOf v) (M.keys idMap)) (value input)
+    mapDyn (\v -> filter (isPrefixOf v) (M.keys grammarIdMap)) (value input)
 
   -- Show the list of alternatves, as long as a choice has not been comitted.
   _ <- elDynAttr "ul" altAttrs $ do
@@ -210,11 +246,12 @@ uiSelectorStep (UiGrammar prods) = divClass "uiSelectorStep" $ mdo
     ) selectedDyn
 
   selectedDyn <-
-    mapDyn (`M.lookup` idMap) (value input)
+    mapDyn (`M.lookup` grammarIdMap) (value input)
 
   uiDynEv <- dyn =<< mapDyn (\uiMatch -> case uiMatch of
     Nothing -> return $ constDyn $ Hole ()
-    Just ui -> unUiBuilder (Term <$> traverse (UiBuilder . uiSelectorStep) ui)
+    Just ui -> unUiBuilder $
+      Term <$> traverse (UiBuilder . uiSelectorStep) ui
     ) selectedDyn
 
   joinDyn <$> holdDyn (constDyn $ Hole ()) uiDynEv
