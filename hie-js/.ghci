@@ -1,0 +1,3 @@
+:set -isrc
+:set -fdefer-type-errors
+:set -fdefer-typed-holes

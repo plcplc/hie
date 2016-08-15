@@ -64,8 +64,10 @@ import Control.Monad.State.Strict
 import Data.Comp
 import Data.Comp.Derive
 import Data.Comp.Render
+import Data.Maybe
 import Data.Comp.Unification
 import Data.Comp.Variables
+import Data.Constraint
 import Data.Proxy
 import Data.Tree
 import Data.Typeable
@@ -493,3 +495,98 @@ test3 = runPolyM $ do
   t1 <- test1 ("string" :: String)
   idApp :: Int <- unbox t1
   return idApp
+
+-- * Type classes
+
+data TDict where
+  TSub :: (Typeable h, Typeable b) => SubDecomposed (h :- b) -> TDict
+
+-- A poor mans means to structurally decompose a constraint tuple.
+data SubDecomposed c where
+  Sub1 :: (Typeable h1, Typeable b) => h1 :- b -> SubDecomposed (h1 :- b)
+  Sub2 ::
+    (
+      Typeable h1,
+      Typeable h2,
+      Typeable b
+    ) =>
+    (h1, h2) :- b -> SubDecomposed ((h1, h2) :- b)
+  Sub3 ::
+    (
+      Typeable h1,
+      Typeable h2,
+      Typeable h3,
+      Typeable b
+    ) =>
+    (h1, h2, h3) :- b -> SubDecomposed ((h1, h2, h3) :- b)
+
+instance Show TDict where
+  showsPrec d (TSub (_ :: SubDecomposed (h :- b))) =
+    showParen (d > 10) (showString "TSub (Sub Dict :: " . shows (typeRep (Proxy :: Proxy h)) . showString " :- " . shows (typeRep (Proxy :: Proxy b)) . showString ")")
+
+-- The big fat store of all recorded type class instances. Perhaps we could one
+-- day produce this by means of a ghc plugin?
+tcStore :: M.Map TypeRep TDict
+tcStore = M.fromList
+  [
+    recordTC1 (Sub Dict :: () :- Show Int),
+    recordTC1 (Sub Dict :: () :- Show Int),
+    recordTC1 (Sub Dict :: () :- Show Double),
+    recordTC1 (Sub Dict :: Show (FreeVar "a") :- Show ((Maybe (FreeVar "a")))),
+    recordTC2 (Sub Dict :: (Show Int, Show Bool) :- Show ((Either Int Bool)))
+  ]
+
+recordTC1 ::
+  forall h b.
+  (Typeable h, Typeable b) =>
+  h :- b ->
+  (TypeRep, TDict)
+recordTC1 sub =
+  (typeRep (Proxy :: Proxy b) , TSub (Sub1 sub))
+
+recordTC2 ::
+  forall h1 h2 b.
+  (Typeable h1, Typeable h2, Typeable b) =>
+  (h1, h2) :- b ->
+  (TypeRep, TDict)
+recordTC2 sub =
+  (typeRep (Proxy :: Proxy b) , TSub (Sub2 sub))
+
+recordTC3 ::
+  forall h1 h2 h3 b.
+  (Typeable h1, Typeable h2, Typeable h3, Typeable b) =>
+  (h1, h2, h3) :- b ->
+  (TypeRep, TDict)
+recordTC3 sub =
+  (typeRep (Proxy :: Proxy b) , TSub (Sub3 sub))
+
+lookupDict ::
+  forall c.
+  (Typeable c) =>
+  M.Map TypeRep TDict ->
+  Proxy c ->
+  Maybe (Dict c)
+lookupDict m p = do
+  TSub (subDecomposed :: SubDecomposed (h :- c')) <- M.lookup (typeRep p) m
+  Refl :: c' :~: c <- eqT
+  case eqT of
+    Just (Refl :: (() :: Constraint) :~: h) -> do
+      Sub1 (Sub d) <- return subDecomposed
+      return d
+    Nothing ->
+      case subDecomposed of
+        Sub1 (sub :: (h1) :- c') -> do
+          Dict <- lookupDict m (Proxy :: Proxy h1)
+          Sub d <- return sub
+          return d
+        Sub2 (sub :: (h1, h2) :- c') -> do
+          Dict <- lookupDict m (Proxy :: Proxy h1)
+          Dict <- lookupDict m (Proxy :: Proxy h2)
+          Sub d <- return sub
+          return d
+        Sub3 (sub :: (h1, h2, h3) :- c') -> do
+          Dict <- lookupDict m (Proxy :: Proxy h1)
+          Dict <- lookupDict m (Proxy :: Proxy h2)
+          Dict <- lookupDict m (Proxy :: Proxy h3)
+          Sub d <- return sub
+          return d

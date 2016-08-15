@@ -17,6 +17,7 @@ import Hie.Ui.NonShowable
 import Hie.Ui.TextLabel
 import Hie.Ui.Types
 import Reflex.Dom
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Map as M
 
@@ -105,3 +106,6 @@ uiEnv = return
     uiNonShowableImpl,
     uiFuncImpl
   ]
+
+serializedDocument :: Reflex t => UiSession t uidomain -> m (Behavior t BS.ByteString)
+serializedDocument = undefined

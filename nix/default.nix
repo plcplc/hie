@@ -30,6 +30,7 @@
         ]))
       (haskell.packages.ghcjs.ghcWithPackages (h : with h; [
         Chart-diagrams
+        constraints
         Cabal
         reflex
         compdata
