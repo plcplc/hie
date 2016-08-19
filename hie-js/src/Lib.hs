@@ -83,8 +83,11 @@ hieJsMain = mainWidgetWithCss
   addBindingEvent <-
     (M.fromList
      [
+       ("Introduction", Just $ HieValue (polyDyn ("This is a document in an instance of the \"Haskell Interactive Environment\". Like in a REPL-session, names are bound to values of some type. New bindings can be added by applying bound function values interactively, or by manipulating the map of bindings through the API. Polymorphic types are supported by of (unsafely but carefully) monomorphising them to \"FreeVar\". The Ui of a binding can be changed dynamically.")) uiTextLabel),
        ("foo", Just $ HieValue (polyDyn (42 :: Int)) uiTextLabel),
-       ("bar", Just $ HieValue (polyDyn ([42, 43] :: [Int])) (uiList uiTextLabel)),
+       ("bar", Just $ HieValue (polyDyn ([1,2,3,4,5] :: [Int])) (uiList uiTextLabel)),
+       ("map", Just $ HieValue (polyDyn (map :: (FreeVar "a" -> FreeVar "b") -> [FreeVar "a"] -> [FreeVar "b"])) (uiFunc (uiFunc (uiList uiTextLabel)))),
+       ("compose", Just $ HieValue (polyDyn ((.) :: (FreeVar "b" -> FreeVar "c") -> (FreeVar "a" -> FreeVar "b") -> FreeVar "a" -> FreeVar "c")) (uiFunc (uiFunc (uiFunc (uiTextLabel))))),
        ("id", Just $ HieValue (polyDyn (id :: FreeVar "a" -> FreeVar "a")) (uiFunc (uiTextLabel))),
        ("plus3", Just $ HieValue (polyDyn ( (+3) :: Int -> Int)) (uiFunc (uiTextLabel)))
      ] <$) <$> getPostBuild
