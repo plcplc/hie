@@ -39,6 +39,7 @@ library
                      , safe
                      , semigroups
                      , time
+                     , transformers
 
   if impl(ghcjs)
     build-depends:       ghcjs-base
