@@ -18,6 +18,7 @@ library
   ghc-options:         -Wall
   exposed-modules:     Lib
                        Data.Dynamic.PolyDyn
+                       Data.Dynamic.TypeClasses
                        Hie.Session
                        Hie.Ui.Func
                        Hie.Ui.List
@@ -39,6 +40,7 @@ library
                      , safe
                      , semigroups
                      , time
+                     , template-haskell
                      , transformers
 
   if impl(ghcjs)

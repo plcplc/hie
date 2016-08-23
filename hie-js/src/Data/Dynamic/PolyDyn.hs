@@ -1,5 +1,4 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveTraversable #-}
@@ -34,6 +33,7 @@ module Data.Dynamic.PolyDyn
     PolyVal,
     PolyM,
     PolyError,
+    PolyMLog,
     TypeSig(..),
     PolyMatch(..),
     ToPolyVal,
@@ -45,6 +45,9 @@ module Data.Dynamic.PolyDyn
     polyDynTy,
     unbox,
     box,
+    freshSig,
+    applyTypeEnv,
+    Data.Dynamic.PolyDyn.unify,
     polyMatch,
     polyMatch',
     unboxMatch,
@@ -56,25 +59,32 @@ module Data.Dynamic.PolyDyn
     renderPolyError,
     withPolyVal,
     var,
-    castPoly
+    castPoly,
+
+    logMessage,
+    logRegion,
+    ppPMLog,
+
+    -- semi-internal functions
+    throwPolyM,
+    toTypeSig,
+    toTypeSig'
+
   ) where
 
 import Control.Monad.Except
 import Control.Monad.State.Strict
-import Control.Monad.Trans.Maybe
 import Control.Monad.Writer
 import Data.Comp
 import Data.Comp.Derive
 import Data.Comp.Render
 import Data.Comp.Unification
 import Data.Comp.Variables
-import Data.Constraint
 import Data.Proxy
 import Data.Tree
 import Data.Typeable
 import Data.Typeable.Internal
 import GHC.TypeLits
-import System.IO.Unsafe
 import Unsafe.Coerce
 import qualified Control.Monad.State.Lazy as LS
 import qualified Data.Map as M
@@ -95,6 +105,12 @@ instance Show PolyDyn where
 
 -- | Type variables that unify freely.
 data FreeVar (name :: Symbol)
+-- TODO: to support type variables of other kinds than '*':
+-- data FreeVar1 (name :: Symbol) a
+-- data FreeVar2 (name :: Symbol) a b
+-- data FreeVar3 (name :: Symbol) a b c
+-- data FreeVar4 (name :: Symbol) a b c d
+-- data FreeVar5 (name :: Symbol) a b c d e
 
 -- | Type variables that only unify with 'FreeVar's.
 data RigidVar (name :: Symbol)
@@ -242,6 +258,9 @@ toTypeSig (PolyVal' v) = return $ Term (TypeSigFreeVar v)
 toTypeSig (Ty' tc ts) = Term . TypeSigConstr tc <$> mapM toTypeSig ts
 toTypeSig _ = error "'toTypeSig': impossible"
 
+freshSig :: forall a s. Typeable a => Proxy a -> PolyM s (Term TypeSig)
+freshSig = freshScope . toTypeSig . typeRep
+
 -- non-fresh version of 'toTypeSig'.
 toTypeSig' :: TypeRep -> Term TypeSig
 toTypeSig' (RigidVar' v) = Term (TypeSigRigidVar v)
@@ -325,6 +344,13 @@ box ::
   sig ->
   PolyM s PolyDyn
 box x = unsafeBox x (Proxy :: Proxy sig)
+
+-- | Add type equations to the type environment and attempt to unify the
+-- types. Equations that do not unify terminates the PolyM action with an error.
+unify :: forall s . [(Term TypeSig, Term TypeSig)] -> PolyM s ()
+unify eqs = MkPolyM $ do
+  putEqs eqs
+  runUnify
 
 type family ToRigidVar (sig :: k) :: k where
   ToRigidVar (FreeVar n) = RigidVar n
@@ -420,6 +446,10 @@ unMatchT pMatch = unsafePolyM $ go
 data S
   deriving (Typeable)
 
+throwPolyM :: forall s a. String -> PolyM s a
+throwPolyM msg =
+  MkPolyM $ throwError $ UnifError $ msg
+
 runPolyM :: (forall s. Typeable s => PolyM s a) -> Either PolyError a
 runPolyM (MkPolyM unifyM :: PolyM S a) =
   let
@@ -441,8 +471,8 @@ debugPolyM  (MkPolyM unifyM :: PolyM S a) =
   let
     loggerM = runUnifyM' unifyM
     freshM = runLoggerM loggerM
-    ((res, log), nextFresh) = runFreshScopeM freshM
-  in (res, log, nextFresh)
+    ((res, log'), nextFresh) = runFreshScopeM freshM
+  in (res, log', nextFresh)
 
 unsafePolyM :: (forall s. Typeable s => PolyM s a) -> a
 unsafePolyM x = either (error . renderPolyError) id $ runPolyM x
@@ -567,7 +597,15 @@ test3 = runPolyM $ do
   idApp :: Int <- unbox t1
   return idApp
 
---test4' :: Either PolyError [TypeRep]
+test4' ::
+  (
+    Either
+      (UnifError TypeSig String)
+      ([Term TypeSig], UnifyState TypeSig String),
+    [PolyMLog],
+    Int
+  )
+
 test4' = debugPolyM $ ((do
   _ :: PolyVal s "a" <- castPoly (42 :: Int)
   let ty1 = toTypeSig' $ typeRep (Proxy :: Proxy (PolyVal s "a"))
@@ -578,320 +616,3 @@ test4' = debugPolyM $ ((do
   ty2'2 <- applyTypeEnv ty2
   return [ty1'1, ty1'2, ty2'1, ty2'2])
   :: forall s. Typeable s => PolyM s [Term TypeSig])
-
--- * Type classes
-
-type TypeClassStore = M.Map TypeClassInstanceKey TDict
-
--- | In a 'TypeClassInstanceKey' we use a canonical representation of type
--- variables (FreeVar) as integers, numbered from zero 'from left to right'.
-type TypeClassInstanceKey = Cxt Hole TypeSig Int
-
--- | Construct the key into a TypeClassStore that corresponds directly to a
--- given constraint.
-typeClassInstanceKey :: Term TypeSig -> TypeClassInstanceKey
-typeClassInstanceKey tySig =
-  evalState (mapM go (varsToHoles tySig)) M.empty
-  where
-    go :: String -> State (M.Map String Int) Int
-    go n = do
-      subst <- get
-      case M.lookup n subst of
-        Just ix -> return ix
-        Nothing -> do
-          let ix = M.size subst
-          put (M.insert n ix subst)
-          return ix
-
--- | Produce successively more parameteterised versions of a
--- 'TypeClassInstanceKey'. When resolving instances, a request for eg
--- 'Show (Either Int String)' can potentially be satisfied by instances of the
--- form:
---
--- * instance Show (Either Int String)
--- * instance Show (Either a String)
--- * instance Show (Either Int [b])
--- * instance Show (Either Int [b])
--- * instance Show (Either Int b)
--- * instance Show (Either a b)
--- * instance Show a
---
--- Note that we neglect parameterising over other kinds than '*'.
--- We won't consider eg:
--- * instance Show (a Int String)
--- The is that I think that the solution above will suffice until I know the
--- direction of further development.
-generaliseKey :: TypeClassInstanceKey -> [TypeClassInstanceKey]
-generaliseKey key =
-  -- Note that we discard the last element, as it represents the completely
-  -- abstract 'instance a', which is beyond what can be expressed with type
-  -- classes.
-  init $ map (flip evalState 0) (go key)
-  where
-    go :: TypeClassInstanceKey -> [State Int TypeClassInstanceKey]
-    go (Hole _) = [freshHole]
-    go t@(Term (TypeSigConstr _ [])) = [return t, freshHole]
-    go t@(Term (TypeSigConstr tycon args)) = (do
-      args' <- allCombinations $ map go args
-      return $ (Term . (TypeSigConstr tycon)) <$> sequence args') ++ [freshHole]
-
-    freshHole :: forall f. State Int (Context f Int)
-    freshHole = do
-      i <- get
-      put $ succ i
-      return $ Hole i
-
-allCombinations :: [[a]] -> [[a]]
-allCombinations [] = []
-allCombinations [b] = [[x] | x <- b]
-allCombinations (b:buckets) = do
-  x <- b
-  xs <- allCombinations buckets
-  return (x:xs)
-
-data TDict where
-  TSub :: (Typeable h, Typeable b) => SubDecomposed (h :- b) -> TDict
-
--- A poor mans means to structurally decompose a Constraint tuple.
-data SubDecomposed c where
-  Sub1 :: (Typeable h1, Typeable b) => h1 :- b -> SubDecomposed (h1 :- b)
-  Sub2 ::
-    (
-      Typeable h1,
-      Typeable h2,
-      Typeable b
-    ) =>
-    (h1, h2) :- b -> SubDecomposed ((h1, h2) :- b)
-  Sub3 ::
-    (
-      Typeable h1,
-      Typeable h2,
-      Typeable h3,
-      Typeable b
-    ) =>
-    (h1, h2, h3) :- b -> SubDecomposed ((h1, h2, h3) :- b)
-
-instance Show TDict where
-  showsPrec d (TSub (_ :: SubDecomposed (h :- b))) =
-    showParen
-      (d > 10)
-      (showString "TSub (Sub Dict :: " .
-       shows (typeRep (Proxy :: Proxy h)) .
-       showString " :- " .
-       shows (typeRep (Proxy :: Proxy b)) .
-       showString ")")
-
--- The big fat store of all recorded type class instances. Perhaps we could one
--- day produce this by means of a ghc plugin?
--- With TemplateHaskell, we can.
-tcStore :: TypeClassStore
-tcStore = M.fromList
-  [
-    recordTC1 (Sub Dict :: () :- Show Bool),
-    recordTC1 (Sub Dict :: () :- Show Int),
-    recordTC1 (Sub Dict :: () :- Show Double),
-    recordTC1 (Sub Dict :: Show (FreeVar "a") :- Show ((Maybe (FreeVar "a")))),
-    recordTC2 (Sub Dict ::
-                  (Show (FreeVar "a"), Show (FreeVar "b"))
-                  :- Show ((Either (FreeVar "a") (FreeVar "b"))))
-  ]
-
-recordTC1 ::
-  forall h b.
-  (Typeable h, Typeable b) =>
-  h :- b ->
-  (TypeClassInstanceKey, TDict)
-recordTC1 sub =
-  (
-    typeClassInstanceKey $ (toTypeSig' $ typeRep (Proxy :: Proxy b)),
-    TSub (Sub1 sub)
-  )
-
-recordTC2 ::
-  forall h1 h2 b.
-  (Typeable h1, Typeable h2, Typeable b) =>
-  (h1, h2) :- b ->
-  (TypeClassInstanceKey, TDict)
-recordTC2 sub =
-  (
-    typeClassInstanceKey $ (toTypeSig' $ typeRep (Proxy :: Proxy b)),
-    TSub (Sub2 sub)
-  )
-
-recordTC3 ::
-  forall h1 h2 h3 b.
-  (Typeable h1, Typeable h2, Typeable h3, Typeable b) =>
-  (h1, h2, h3) :- b ->
-  (TypeClassInstanceKey, TDict)
-recordTC3 sub =
-  (
-    typeClassInstanceKey $ (toTypeSig' $ typeRep (Proxy :: Proxy b)),
-    TSub (Sub3 sub)
-  )
-
-lookupInstanceMaybeT ::
-  forall s c.
-  (Typeable c) =>
-  TypeClassStore ->
-  Term TypeSig ->
-  MaybeT (PolyM s) (Dict c)
-lookupInstanceMaybeT m bodyTySig = mapMaybeT logRegion $ do
-
-  {-
-  Now, implementing this was quite an effort. A study of confusion and
-  'unsafePerformIO' for debugging.
-
-  I guess a bit of commentary would be appropriate.
-
-  In order to figure out how to recursively do instance lookups, I resorted to
-  'unsafePerformIO' to output debug statements.
-
-  IMHO this is a symptom of bad form. Debug aides (like 'putStrLn') are only
-  transient tools that allow one to navigate complexity in the moment of
-  implementing. Afterwards there's just a complex bulb left, with no indications
-  as to what it supposedly does and how it does it.
-
-  Now, what should I have done instead? I'm not sure, but I do have some
-  observations:
-
-  * 'MaybeT' doesn't leave much room for error reporting.
-  * 'PolyM' only has 'UnifError'
-  * Tracing in 'PolyM' (using 'MonadWriter') could be useful to supplement
-    unification errors.
-  * Adhering to Unit/Property tests rather than log tracing could inform a more
-    elegant/approachable/inspectable design.
-
-  Epilogue: In the end I added a logging facility to PolyM, but have yet to do
-  testing.
-
-  -}
-
-  -- Lookup the various keys that would satisfy the constraint of 'p', matching
-  -- the most specific first.
-  lift $ logMessage ("Resolving type class instance:\n" ++ showTerm bodyTySig)
-  let keys = generaliseKey (typeClassInstanceKey $ bodyTySig)
-  let First match = mconcat $ map (First . flip M.lookup m) keys
-  (TSub (subDecomposed :: SubDecomposed (h :- c'))) <- MaybeT (return match)
-
-  Refl :: c' :~: c <- return $ unsafeCoerce Refl
-
-  case eqT of
-    Just (Refl :: (() :: Constraint) :~: h) -> do
-      Sub1 (Sub d) <- return subDecomposed
-      return d
-    Nothing ->
-
-      -- For each constraint in the head of the located instance, unify the type
-      -- variables that occur in them with those of bodyTySig.
-      -- That is: unify( h' :- c' === $a :- bodyTySig)
-      -- substituting $a yields the heads we're interested in looking up
-      -- recursively.
-
-      case subDecomposed of
-
-        Sub1 (sub :: (h1') :- c') -> do
-
-          h1Sig <- lift $ freshSig (Proxy :: Proxy (FreeVar "a"))
-
-          let subTySig = subSig h1Sig bodyTySig
-          subTySig' <- lift $ freshSig (Proxy :: Proxy ((h1') :- c'))
-
-          lift $ MkPolyM $ putEqs [(subTySig, subTySig')]
-          lift $ MkPolyM $ runUnify
-
-          h1Subst <- lift (applyTypeEnv h1Sig)
-
-          {-
-          subst <- lift $ MkPolyM get
-          seq (unsafePerformIO (putStrLn $ "bodyTySig = " ++ show bodyTySig)) (return ())
-          seq (unsafePerformIO (putStrLn $ "keys = " ++ show keys)) (return ())
-          seq (unsafePerformIO (putStrLn $ "Sub1 :: " ++ show (typeOf sub))) (return ())
-          seq (unsafePerformIO (putStrLn $ "subTySig = " ++ show (subTySig))) (return ())
-          seq (unsafePerformIO (putStrLn $ "subTySig' = " ++ show (subTySig'))) (return ())
-          --let nextKey = typeClassInstanceKey subTySig
-          --seq (unsafePerformIO (putStrLn $ "nextKey = " ++ show (nextKey))) (return ())
-          seq (unsafePerformIO (putStrLn $ "subst = " ++ show (subst))) (return ())
-            -}
-
-          Dict :: Dict h1' <- lookupInstanceMaybeT m h1Subst
-          Sub d <- return sub
-          return d
-
-        Sub2 (sub :: (h1', h2') :- c') -> do
-
-          [h1Subst, h2Subst] <- lift $ unifySub (proxyOf sub)
-          Dict :: Dict h1' <- lookupInstanceMaybeT m h1Subst
-          Dict :: Dict h2' <- lookupInstanceMaybeT m h2Subst
-          Sub d <- return sub
-          return d
-
-        Sub3 (sub :: (h1', h2', h3') :- c') -> do
-
-          [h1Subst, h2Subst, h3Subst] <- lift $ unifySub (proxyOf sub)
-          Dict :: Dict h1' <- lookupInstanceMaybeT m h1Subst
-          Dict :: Dict h2' <- lookupInstanceMaybeT m h2Subst
-          Dict :: Dict h3' <- lookupInstanceMaybeT m h3Subst
-          Sub d <- return sub
-          return d
-
-  where
-
-    unifySub ::
-      forall h' b'.
-      (Typeable h', Typeable b') =>
-      Proxy (h' :- b') ->
-      PolyM s [Term TypeSig]
-    unifySub pSub' = do
-      sub'Sig@(Term (TypeSigConstr _ sub'Args)) <- freshSig pSub'
-      let [h'Sig, b'Sig] = sub'Args
-      let Term (TypeSigConstr hTyCon h'Components) = h'Sig
-      hComponents <- sequence $ replicate (length h'Components)
-                    (freshSig (Proxy :: Proxy (FreeVar "a")))
-
-      let subSig_ = subSig (Term (TypeSigConstr hTyCon hComponents)) bodyTySig
-
-      MkPolyM $ putEqs [(subSig_, sub'Sig)]
-      MkPolyM $ runUnify
-
-      mapM applyTypeEnv hComponents
-
-    freshSig :: forall a. Typeable a => Proxy a -> PolyM s (Term TypeSig)
-    freshSig = freshScope . toTypeSig . typeRep
-
-proxyOf :: Typeable a => a -> Proxy a
-proxyOf _ = Proxy
-
-subSig :: Term TypeSig -> Term TypeSig -> Term TypeSig
-subSig h b =
-  let
-    Term (TypeSigConstr tyCon []) = toTypeSig' (typeRep (Proxy :: Proxy (:-)))
-  in Term (TypeSigConstr tyCon [h, b])
-
-lookupInstanceMaybe ::
-  forall s c.
-  (Typeable c) =>
-  TypeClassStore ->
-  Term TypeSig ->
-  PolyM s (Maybe (Dict c))
-lookupInstanceMaybe m p = runMaybeT $ lookupInstanceMaybeT m p
-
--- | Lookup an instance for the constraint 'c' in a given typeclass store.
-lookupInstance ::
-  forall s (c :: Constraint).
-  (Typeable c) =>
-  TypeClassStore ->
-  Proxy c ->
-  PolyM s (Dict c)
-lookupInstance m p = do
-  tySig <- applyTypeEnv =<< freshScope (toTypeSig $ typeRep p)
-  res <- lookupInstanceMaybe m tySig
-  case res of
-    Just res' -> return res'
-    Nothing ->
-      MkPolyM $ throwError $ UnifError $ "No instance for " ++ show (tySig)
-
-test5 :: forall s. Typeable s => TypeClassStore -> PolyDyn -> PolyM s (String)
-test5 tc pd = do
-  v :: PolyVal s "a" <- unbox pd
-  Dict <- lookupInstance tc (Proxy :: Proxy (Show (PolyVal s "a")))
-  return (show v)
