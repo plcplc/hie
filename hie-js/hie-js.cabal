@@ -20,6 +20,7 @@ library
                        Data.Dynamic.PolyDyn
                        Data.Dynamic.TypeClasses
                        Hie.Session
+                       Hie.Ui.DownloadLink
                        Hie.Ui.Func
                        Hie.Ui.List
                        Hie.Ui.NonShowable
@@ -30,6 +31,8 @@ library
 
   build-depends:       base >= 4.7 && < 5
                      , bytestring
+                     , base64-bytestring
+                     , cereal
                      , compdata
                      , constraints
                      , containers

@@ -10,7 +10,9 @@ module Lib where
 
 import Data.Comp
 import Data.Dynamic.PolyDyn
+import Data.Serialize
 import Hie.Session
+import Hie.Ui.DownloadLink
 import Hie.Ui.Func
 import Hie.Ui.List
 import Hie.Ui.NonShowable
@@ -83,20 +85,31 @@ hieJsMain = mainWidgetWithCss
   addBindingEvent <-
     (M.fromList
      [
-       ("Introduction", Just $ HieValue (polyDyn ("This is a document in an instance of the \"Haskell Interactive Environment\". Like in a REPL-session, names are bound to values of some type. New bindings can be added by applying bound function values interactively, or by manipulating the map of bindings through the API. Polymorphic types are supported by of (unsafely but carefully) monomorphising them to \"FreeVar\". The Ui of a binding can be changed dynamically.")) uiTextLabel),
+       ("Introduction", Just $ HieValue (
+         polyDyn
+           "This is a document in an instance of the \"Haskell Interactive\
+           \Environment\". Like in a REPL-session, names are bound to \
+           \values of some type. New bindings can be added by applying \
+           \bound function values interactively, or by manipulating the map \
+           \of bindings through the API. Polymorphic types are supported \
+           \by of (unsafely but carefully) monomorphising them to \"FreeVar\". \
+           \The Ui of a binding can be changed dynamically.")
+         uiTextLabel),
        ("foo", Just $ HieValue (polyDyn (42 :: Int)) uiTextLabel),
        ("bar", Just $ HieValue (polyDyn ([1,2,3,4,5] :: [Int])) (uiList uiTextLabel)),
        ("map", Just $ HieValue (polyDyn (map :: (FreeVar "a" -> FreeVar "b") -> [FreeVar "a"] -> [FreeVar "b"])) (uiFunc (uiFunc (uiList uiTextLabel)))),
        ("compose", Just $ HieValue (polyDyn ((.) :: (FreeVar "b" -> FreeVar "c") -> (FreeVar "a" -> FreeVar "b") -> FreeVar "a" -> FreeVar "c")) (uiFunc (uiFunc (uiFunc (uiTextLabel))))),
        ("id", Just $ HieValue (polyDyn (id :: FreeVar "a" -> FreeVar "a")) (uiFunc (uiTextLabel))),
-       ("plus3", Just $ HieValue (polyDyn ( (+3) :: Int -> Int)) (uiFunc (uiTextLabel)))
+       ("plus3", Just $ HieValue (polyDyn ( (+3) :: Int -> Int)) (uiFunc (uiTextLabel))),
+       ("download", Just $ HieValue (polyDyn (encode :: Serialize (FreeVar "a") => FreeVar "a" -> BS.ByteString)) (uiFunc uiDownloadLink))
+       -- ("downloadDyn", Just $ HieValue (polyDynTC (encode :: Serialize a => a -> BS.ByteString)) (uiDynamic uiDownloadLink))
      ] <$) <$> getPostBuild
   
   uiEnv' <- uiEnv
   wireSession uiEnv' addBindingEvent
   return ()
 
-type UiDomain = UiList :+: UiTextLabel :+: UiNonShowable :+: UiFunc
+type UiDomain = UiDownloadLink :+: UiList :+: UiTextLabel :+: UiNonShowable :+: UiFunc
 
 uiEnv :: forall t m . (MonadWidget t m) => m (UiEnv UiDomain t m)
 uiEnv = return
@@ -109,6 +122,3 @@ uiEnv = return
     uiNonShowableImpl,
     uiFuncImpl
   ]
-
-serializedDocument :: Reflex t => UiSession t uidomain -> m (Behavior t BS.ByteString)
-serializedDocument = undefined
