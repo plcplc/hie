@@ -7,7 +7,27 @@
 
 module Hie.Session where
 
+import Hie.Ui.Types
+import Reflex.Dom
 
+-- Render a single value. Yields a time changing dynamic value, which is a
+-- function of the ui interactions on the given value.
+liveValue ::
+  (Reflex t, MonadWidget t m) =>
+  HieValue caps ->
+  m (Dynamic t (HieValue caps))
+liveValue value = undefined
+
+-- Given a source of events exogeneous to the ui that maintains a hie document,
+-- render the document and yield the constructed document as a time-changing
+-- dynamic value.
+liveDocument ::
+  (Reflex t, MonadWidget t m, ListMember HieDocument caps) =>
+  Event t (CrudAction caps) ->
+  m (Dynamic t (HieValue caps))
+liveDocument exoChanges = undefined
+
+{-
 import Control.Monad.Except
 import Data.Comp
 import Data.Dynamic.PolyDyn
@@ -264,3 +284,5 @@ uiSelectorStep (UiGrammar prods) = divClass "uiSelectorStep" $ mdo
     -- sort of pathological anyway, as 'uiIdentifier' is meant to be unique.
     identMap :: [uidomain a] -> M.Map String (uidomain a)
     identMap = M.unions . map (\ui -> M.singleton (uiIdentifier ui) ui)
+
+-}

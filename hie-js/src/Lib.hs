@@ -1,13 +1,98 @@
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 
 module Lib where
 
+import Data.Comp.Term
+import Data.Constraint
+import Reflex.Dom
+import Hie.Ui.Types
+import Data.Proxy
+import qualified Data.ByteString.Char8 as BS8
+
+hieJsMain ::
+  forall uidomain caps.
+  (UiDomain uidomain caps) =>
+  Proxy caps ->
+  HieValue caps ->
+  IO ()
+hieJsMain pcaps val = mainWidgetWithCss
+  (BS8.pack "") $ do
+    _ <- runHieValueUi pcaps val
+    return ()
+
+
+runHieValueUi ::
+  forall caps t m uidomain.
+  (Reflex t, MonadWidget t m, UiDomain uidomain caps) => 
+  Proxy caps ->
+  HieValue caps ->
+  m (Event t (HieValue caps))
+runHieValueUi
+  pcaps
+  HieValue {
+    hieVal = val :: a,
+    hieUi = uiMaybe,
+    hieCapabilites = caps
+    } =
+  case uiMaybe of
+    Nothing -> text "No ui specified" >> return never
+    Just (Term uiTerm) ->
+      case extractUiCap pcaps uiTerm caps of
+        Nothing -> text "Specified ui not supported (impossible)" >> return never
+        Just WUI { wuiV = ui', wuiDict = (Dict :: Dict (Ui ui a)) } -> ui ui' val caps
+
+extractUiCap ::
+  forall subuidomain uidomain caps a.
+  (AllUiInCaps uidomain caps, AllUiInCaps subuidomain caps) =>
+  Proxy caps ->
+  (Sum subuidomain) (Term (Sum uidomain)) ->
+  Capabilities caps a ->
+  Maybe (WrappedUi uidomain a)
+extractUiCap
+  pcaps
+  (SumThere uiSum) cs
+  = extractUiCap pcaps uiSum cs
+extractUiCap
+  _
+  (SumHere (ui' :: ui (Term (Sum uidomain)))) cs
+  = do
+    d <- project'
+    return $ WUI ui' d
+
+  where
+
+    project' :: Maybe (Dict (Ui ui a))
+    project'  = lookupCap cs (listIx :: ListIx caps (Ui ui))
+
+    lookupCap :: Capabilities cs a -> ListIx cs (Ui ui) -> Maybe (Dict (Ui ui a))
+    lookupCap (HCons d _)  ListIxHead     = d
+    lookupCap (HCons _ xs) (ListIxTail t) = lookupCap xs t
+    lookupCap HNil         _              = error "Truly impossible"
+
+data WrappedUi uidomain a = forall (ui :: * -> *). WUI {
+    wuiV :: ui (Term (Sum uidomain)),
+    wuiDict :: Dict (Ui ui a )
+  } 
+
+  {-
+lookupCap ::
+  forall (c :: * -> Constraint) caps a.
+  ListIx caps c ->
+  Capabilities caps a ->
+  Maybe (Dict (c a))
+lookupCap = undefined
+-}
+
+{-
 import Data.Comp
 import Data.Dynamic.PolyDyn
 import Data.Serialize
@@ -122,3 +207,5 @@ uiEnv = return
     uiNonShowableImpl,
     uiFuncImpl
   ]
+
+-}

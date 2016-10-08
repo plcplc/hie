@@ -25,6 +25,7 @@ library
                        Hie.Ui.List
                        Hie.Ui.NonShowable
                        Hie.Ui.TextLabel
+                       Hie.Ui.DocumentContainer
                        Hie.Ui.Types
                        Reflex.Aux
 
@@ -36,6 +37,8 @@ library
                      , compdata
                      , constraints
                      , containers
+                     , dependent-map
+                     , dependent-sum
                      , ghc-prim
                      , mtl
                      , reflex
