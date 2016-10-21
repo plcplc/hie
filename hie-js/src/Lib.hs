@@ -17,42 +17,42 @@ import Reflex.Dom
 import Hie.Ui.Types
 import Data.Proxy
 import qualified Data.ByteString.Char8 as BS8
+import qualified Data.Map as M
 
 hieJsMain ::
   forall uidomain caps.
   (UiDomain uidomain caps) =>
-  Proxy caps ->
   HieValue caps ->
   IO ()
-hieJsMain pcaps val = mainWidgetWithCss
+hieJsMain val = mainWidgetWithCss
   (BS8.pack "") $ do
-    _ <- runHieValueUi pcaps val
+    _ <- runHieValueUi val
     return ()
-
 
 runHieValueUi ::
   forall caps t m uidomain.
   (Reflex t, MonadWidget t m, UiDomain uidomain caps) => 
-  Proxy caps ->
+  -- Proxy caps ->
   HieValue caps ->
-  m (Event t (HieValue caps))
+  m (Maybe (ReactiveHieValue t caps uidomain))
 runHieValueUi
-  pcaps
+  -- pcaps
   HieValue {
     hieVal = val :: a,
     hieUi = uiMaybe,
     hieCapabilites = caps
     } =
   case uiMaybe of
-    Nothing -> text "No ui specified" >> return never
+    Nothing -> text "No ui specified" >> return Nothing
     Just (Term uiTerm) ->
-      case extractUiCap pcaps uiTerm caps of
-        Nothing -> text "Specified ui not supported (impossible)" >> return never
-        Just WUI { wuiV = ui', wuiDict = (Dict :: Dict (Ui ui a)) } -> ui ui' val caps
+      case extractUiCap (Proxy :: Proxy caps) uiTerm caps of
+        Nothing -> text "Specified ui not supported (impossible)" >> return Nothing
+        Just WUI { wuiV = ui', wuiDict = (Dict :: Dict (ListMember ui uidomain, Ui ui a)) } ->
+          Just <$> ui ui' val caps (unsafeDynamic (pure M.empty) never) 
 
 extractUiCap ::
   forall subuidomain uidomain caps a.
-  (AllUiInCaps uidomain caps, AllUiInCaps subuidomain caps) =>
+  (AllUiInCaps uidomain uidomain caps, AllUiInCaps subuidomain uidomain caps) =>
   Proxy caps ->
   (Sum subuidomain) (Term (Sum uidomain)) ->
   Capabilities caps a ->
@@ -65,11 +65,13 @@ extractUiCap
   _
   (SumHere (ui' :: ui (Term (Sum uidomain)))) cs
   = do
-    d <- project'
-    return $ WUI ui' d
+    Dict <- project'
+    return $ WUI ui' Dict
 
   where
 
+    -- We should use 'Projectable', but it needs a refactoring to be usable it
+    -- seems.
     project' :: Maybe (Dict (Ui ui a))
     project'  = lookupCap cs (listIx :: ListIx caps (Ui ui))
 
@@ -80,7 +82,7 @@ extractUiCap
 
 data WrappedUi uidomain a = forall (ui :: * -> *). WUI {
     wuiV :: ui (Term (Sum uidomain)),
-    wuiDict :: Dict (Ui ui a )
+    wuiDict :: Dict (ListMember ui uidomain, Ui ui a)
   } 
 
   {-

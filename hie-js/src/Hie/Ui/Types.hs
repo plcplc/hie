@@ -102,7 +102,7 @@ instance MaybeInstance Show Double where
 instance MaybeInstance Read Double where
 
 type Capabilities caps a = HList (MapMaybeDict caps a)
-type UiDomain uidomain caps = (uidomain ~ FilterUiDomain caps, AllUiInCaps uidomain caps)
+type UiDomain uidomain caps = (uidomain ~ FilterUiDomain caps, AllUiInCaps uidomain uidomain caps)
 
 class Injectable (f :: * -> *) (l :: * -> *) where
   -- type Injected l :: * -> *
@@ -140,11 +140,12 @@ instance (ListMember f l) => Projectable f (Sum l a) where
       go _ _ = Nothing
 
 type family AllUiInCaps
+  (uidomainInd :: [* -> *])
   (uidomain :: [* -> *])
   (caps :: [* -> Constraint])
   :: Constraint where
-  AllUiInCaps (ui ': uidom) caps = (ListMember (Ui ui) caps, AllUiInCaps uidom caps)
-  AllUiInCaps '[] caps = ()
+  AllUiInCaps (ui ': uidom) uidomain caps = (ListMember ui uidomain, ListMember (Ui ui) caps, AllUiInCaps uidom uidomain caps)
+  AllUiInCaps '[] uidomain caps = ()
 
 type family MapMaybeDict (fs :: [* -> Constraint]) (x :: *) :: [*] where
   MapMaybeDict (f ': l) x = Maybe (Dict (f x)) ': MapMaybeDict l x
@@ -176,16 +177,36 @@ type family FilterUiDomain
   FilterUiDomain (x ': cs) = FilterUiDomain cs
   FilterUiDomain '[]  = '[]
 
+-- Live HieValues are rendered by means of the Ui-capabilities they implement.
+-- A Ui capability can specify reactive dependencies to other values, and they
+-- are capable of producing new HieValues. It's up to the containing HieValue to
+-- decide what to do about newly produced values.
 class Ui (ui :: * -> *) (a :: *) where
   ui ::
     (
-      UiDomain uidomain caps
+      ListMember ui uidomain
+    , UiDomain uidomain caps
     , MonadWidget t m
-    )
-    => ui (Term (Sum uidomain))
-    -> a
-    -> Capabilities caps a
-    -> m (Event t (HieValue caps))
+    ) =>
+    ui (Term (Sum uidomain)) ->
+    a ->
+    Capabilities caps a ->
+    Dynamic t (M.Map HieRef (Dynamic t (HieValue caps))) ->
+    m (ReactiveHieValue t caps uidomain)
+
+-- | A 'ReactiveHieValue' captures the reactive outputs of a live hie value,
+-- that is, a HieValue that is connected to the rest of the document/session
+-- through the 'ui' method.
+data ReactiveHieValue t caps uidomain =
+  ReactiveHieValue {
+    rhvCreateValues :: Event t (HieValue caps),
+    -- ^ Should the Ui of a HieValue wish to create new HieValues, it does so
+    -- through this event.
+    rhvUiState      :: Behavior t (Term (Sum uidomain))
+    -- ^ The Ui should maintain its state in this behavior, in the event that
+    -- other values want to read it (eg. in the event of the document being
+    -- serialized)
+    }
 
 -- Hie Values. The values that can be shown in the user interface. It is
 -- parametrised by the universe of capabilies (that is, witnesses of type class
@@ -201,6 +222,11 @@ data HieValue (caps :: [* -> Constraint]) =
   {
     hieVal :: a
   , hieUi  ::
+      -- TODO: Is it justified to keep the selected ui as a built in part of a
+      -- HieValue? Would it maybe be better if it were simply a part of the
+      -- dynamic state in a Hie document? Then keeping track of the currently
+      -- selected ui for a HieValue and its state becomes the responsibility of
+      -- the containing HieValue. Hm. Interesting...
       forall uidomain.
       UiDomain uidomain caps =>
       Maybe (Term (Sum uidomain))
@@ -210,8 +236,8 @@ data HieValue (caps :: [* -> Constraint]) =
 valueMaybeCaps :: 
   forall caps a uidomain.
   (MaybeCaps caps a, UiDomain uidomain caps) =>
-  a -> Maybe (Term (Sum uidomain)) -> HieValue caps
-valueMaybeCaps x ui' = HieValue x ui' (maybeCaps (Proxy :: Proxy caps) (Proxy :: Proxy a))
+  Proxy caps -> a -> Maybe (Term (Sum uidomain)) -> HieValue caps
+valueMaybeCaps Proxy x ui' = HieValue x ui' (maybeCaps (Proxy :: Proxy caps) (Proxy :: Proxy a))
 
 value ::
   forall a uidomain caps.
@@ -238,7 +264,9 @@ data MarkDown =
   MDParagraph String
 
 instance Ui RichText MarkDown where
-  ui RichText md _ = renderMD md >> return never
+  ui u@RichText md _ _ = do
+    renderMD md
+    return $ ReactiveHieValue never (pure $ Term $ inject u)
     where
       renderMD :: (MonadWidget t m) => MarkDown -> m ()
       renderMD (MDHeading h) = el "h1" $ text h
@@ -246,15 +274,16 @@ instance Ui RichText MarkDown where
       renderMD (MDList l) = el "ul" $ mapM_ renderMD l
 
 instance MaybeInstance (Ui RichText) MarkDown where
-  
 
 data ShowString e = ShowString
 
 uiShowString :: ListMember ShowString uidomain => Term (Sum uidomain)
-uiShowString = Term $ (inject ShowString)
+uiShowString = Term $ inject ShowString
 
 instance Show a => Ui ShowString a where
-  ui ShowString x _ = (text $ show x) >> return never
+  ui u@ShowString x _ _ = do
+    text $ show x
+    return $ ReactiveHieValue never (pure (Term $ inject u))
 
 data ReactiveFunc e = ReactiveFunc HieRef e
 
@@ -266,18 +295,25 @@ uiReactiveFunc ::
 uiReactiveFunc = undefined
 
 instance Ui ReactiveFunc (a -> b) where
-  ui = undefined
-
+  ui u@(ReactiveFunc _ _) _ _ _ = do
+    text $ "todo..."
+    return $ ReactiveHieValue never (pure (Term $ inject u))
 
 -- UI that presents the values of a Hie Document as freely floating windows
 data FloatingWindows e = FloatingWindows
 
 uiFloatingWindows :: ListMember FloatingWindows uidomain => Term (Sum uidomain)
-uiFloatingWindows = undefined
+uiFloatingWindows = Term $ inject FloatingWindows
 
 -- UI that presents the values of a Hie Document as a textual flow of boxes,
 -- like in HTML.
 data FlowingBoxes e = FlowingBoxes
 
 uiFlowingBoxes :: ListMember FlowingBoxes uidomain => Term (Sum uidomain)
-uiFlowingBoxes = undefined
+uiFlowingBoxes = Term $ inject FlowingBoxes
+
+-- UI that lays out the values of a Hie Document in a grid
+data Grid e = Grid
+
+uiGrid :: ListMember Grid uidomain => Term (Sum uidomain)
+uiGrid = undefined
